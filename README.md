@@ -2,7 +2,8 @@
 
 A complete firmware for the **LILYGO T-Embed SI4732** that turns it into a
 web-connected multiband radio receiver with real-time spectrum waterfall,
-audio streaming, software SSB/CW demodulation, and browser-based FT8 decoding.
+audio streaming, software SSB/CW demodulation, and browser-based FT8/JS8Call
+decoding.
 
 ---
 
@@ -44,11 +45,15 @@ correctly in the AM passband. See `BandConfig.h` for the tuning notes.
 - **Audio streaming** — raw 16-bit PCM over WebSocket, Web Audio API playback
 - **Browser-side BFO pitch trim** — instant pitch adjustment without
   a network round-trip, processed in the AudioWorklet
-- **FT8 decoder** — browser-side WASM decoder (ft8_lib), UTC slot-aligned,
-  no PC software needed
+- **FT8 / JS8Call decoder** — browser-side WASM decoder (ft8_lib), UTC
+  slot-aligned, no PC software needed; supports FT8 (15 s), JS8Call Fast
+  (6 s), Normal (10 s), and Slow (30 s) slot modes
+- **NTP time sync** — ESP32 NTP client feeds accurate UTC to the browser;
+  configurable server via web GUI; **Sync Now** button for manual alignment
+  when internet NTP is unavailable
 - Band and mode selector with all 36 bands
-- RSSI / SNR signal meters
-- RDS display for FM stations
+- **S-meter** — RSSI displayed as S1–S9 / S9+dB (S9 = 34 dBμV, 6 dB/unit)
+- SNR bar and RDS display for FM stations
 - Volume, AGC, and BFO trim controls
 
 ### Power Management
@@ -59,9 +64,15 @@ correctly in the AM passband. See `BandConfig.h` for the tuning notes.
 - Battery fallback (gauge absent): 13-point LiPo discharge curve lookup
   instead of a linear approximation
 - Battery % and charging indicator on the local TFT display and web UI
+- **Wi-Fi modem sleep** — enabled after STA connect; reduces WiFi TX current
+  ~30% with negligible latency impact
+- **WebSocket stream throttle** — stream task drops to 100 ms loop period
+  when no browser clients are connected (vs 20 ms active), saving CPU
 
 ### Hardware UI
-- 1.9" ST7789V IPS TFT — frequency, mode, band, signal meters, RDS, battery
+- 1.9" ST7789V IPS TFT — frequency, mode, band, S-meter, RDS, battery
+- **Auto-dim / auto-sleep** — TFT backlight dims after 30 s idle, turns off
+  after 2 min; any encoder or button input restores full brightness
 - Rotary encoder — tunes frequency, volume, BFO trim, or band (press cycles)
 - Long press — seek / mute toggle
 - Double press — reset BFO trim to zero
@@ -142,6 +153,12 @@ SI4732 analog audio (IO17)
        v
 ESP32-S3 ADC1_CH6 — continuous DMA, 16 kHz, 12-bit
        |
+       v
+esp_adc_cal_raw_to_voltage()  [corrects ±50 LSB INL bow]
+       |
+       v
+IIR DC blocker  y[n] = x[n] - x[n-1] + 0.9999·y[n-1]  [removes DC]
+       |
        +-- SoftSSBDemod.process()   [in-place, when SSB/CW active]
        |     DDS BFO oscillator (sin LUT, 32-bit phase accumulator)
        |     4th-order Butterworth LPF (two cascaded biquads)
@@ -153,7 +170,8 @@ ESP32-S3 ADC1_CH6 — continuous DMA, 16 kHz, 12-bit
              |
              +-- FFTProcessor  --> waterfall bins --> /ws/radio
              |
-             +-- ft8Decoder    --> 15s slot buffers --> WASM decode
+             +-- ft8Decoder    --> configurable slot buffers --> WASM decode
+                               (FT8 15s / JS8 6–30s)
 ```
 
 ---
@@ -176,23 +194,23 @@ src/
 │   ├── SoftSSBDemod.h/.cpp    Software product detector (no patch needed)
 │   ├── FFTProcessor.h/.cpp    Hann-windowed FFT → waterfall magnitude bins
 ├── audio/
-│   └── AudioCapture.h/.cpp    ADC DMA capture, SoftSSBDemod hook, ring buffer
+│   └── AudioCapture.h/.cpp    ADC DMA, ADC cal, IIR DC-blocker, ring buffer
 ├── web/
-│   ├── WebServer.cpp          Wi-Fi, LittleFS, REST API
+│   ├── WebServer.cpp          Wi-Fi AP+STA, captive portal, NTP, REST API
 │   └── WebSocketHandler.h/.cpp /ws/audio PCM + /ws/radio waterfall+status
 ├── display/
-│   └── DisplayManager.h/.cpp  Sprite-buffered TFT UI, battery % + charging
+│   └── DisplayManager.h/.cpp  Sprite TFT UI, S-meter, auto-dim/sleep
 ├── input/
-│   └── EncoderHandler.h/.cpp  Rotary encoder single/double/long press
+│   └── EncoderHandler.h/.cpp  Rotary encoder, calls wakeDisplay()
 └── main.cpp                   FreeRTOS tasks, I2CScanner, PowerManager init
 data/                          LittleFS web UI (pio run -t uploadfs)
 ├── index.html
 ├── css/style.css
 └── js/
-    ├── app.js                 Main UI controller, WebSocket management
+    ├── app.js                 UI controller, S-meter, NTP status
     ├── audio.js               Web Audio API PCM player + browser BFO
     ├── waterfall.js           Canvas waterfall renderer (heat/ice/green)
-    └── ft8.js                 FT8 decoder worker, UTC slot alignment
+    └── ft8.js                 FT8/JS8Call decoder, NTP slot alignment
 ```
 
 ### FreeRTOS Tasks
@@ -238,7 +256,9 @@ Text (server→client):  JSON status @ 2 Hz
     "rssi":45, "snr":22, "stereo":false, "volume":40,
     "bat":3.85, "batPct":72, "charging":false, "usbIn":false,
     "rdsName":"", "rdsProg":"", "agc":true, "agcGain":0,
-    "sampleRate":16000, "dropped":0, "ts":12345678, "bands":[...] }
+    "sampleRate":16000, "dropped":0, "ts":12345678,
+    "ntpSynced":true, "utcMs":1700000000000,   // UTC ms (only when NTP synced)
+    "bands":[...] }
 
 Text (client→server):  JSON commands
   { "cmd":"tune",      "freq":14074 }
@@ -258,6 +278,8 @@ Text (client→server):  JSON commands
 | GET | `/api/status` | Full receiver status JSON |
 | GET | `/api/bands` | All 36 bands with details |
 | GET | `/api/ft8freqs` | FT8 dial frequencies |
+| GET | `/api/ntp` | NTP server, sync state, UTC ms |
+| POST | `/api/ntp` | `{"server":"pool.ntp.org"}` — set NTP server |
 | POST | `/api/tune` | `{"freq":14074}` |
 | POST | `/api/mode` | `{"mode":"USB"}` |
 | POST | `/api/band` | `{"index":21}` |
@@ -349,12 +371,12 @@ BFO wraps — producing seamless, jump-free audio tuning.
 
 ---
 
-## FT8 Decoding
+## FT8 / JS8Call Decoding
 
-FT8 decoding runs entirely in the **browser** — no PC software needed.
+Decoding runs entirely in the **browser** — no PC software needed.
 
 ```
-SI4732 tuned to FT8 dial frequency (USB mode)
+SI4732 tuned to FT8/JS8Call dial frequency (USB mode)
 SI4732 in AM mode + SoftSSBDemod recovers the USB audio
        |
        v
@@ -362,13 +384,34 @@ Audio streams over WebSocket to browser
        |
        v
 ft8_lib WASM decoder in a Web Worker
-  - Waits for next UTC 15-second boundary (alignment fix)
-  - Buffers a complete 15-second slot
-  - Decodes: callsigns, grid squares, signal reports
+  - Clock reference: ESP32 NTP UTC epoch fed via status frames every 500 ms
+    browser computes correctedNow = espUtcMs + (Date.now() − receiveMs)
+  - Waits for next UTC slot boundary (FT8 15 s / JS8Call 6–30 s)
+  - Buffers a complete slot then decodes: callsigns, grid squares, reports
        |
        v
-Decoded spots shown in scrollable log
+Decoded spots shown in scrollable log (newest first)
 ```
+
+**Slot modes** (selectable in the web UI *Slot:* dropdown):
+
+| Mode | Slot | Notes |
+|------|------|-------|
+| FT8 | 15 s | Standard — aligns to UTC 15 s grid |
+| JS8Call Fast | 6 s | Aligns to UTC 6 s grid |
+| JS8Call Normal | 10 s | Aligns to UTC 10 s grid |
+| JS8Call Slow | 30 s | Aligns to UTC 30 s grid |
+
+**Time synchronisation options** (best to worst):
+
+1. **NTP (automatic)** — ESP32 syncs to `pool.ntp.org` (or custom server) when
+   STA Wi-Fi is connected. UTC timestamp is injected into every status frame and
+   used by the browser decoder for slot alignment.
+2. **Custom NTP server** — enter an IP or hostname in the *NTP:* field and press
+   **Set**. Stored in NVS flash, survives reboots.
+3. **Sync Now (manual)** — when NTP is unavailable, press **Sync Now** at the
+   exact moment you hear the first FT8 tones. The decoder snaps its slot
+   boundary to that instant.
 
 **Pre-configured FT8 frequencies (USB dial):**
 
@@ -427,18 +470,18 @@ All installed automatically by PlatformIO from `platformio.ini`:
 | Band configuration | `BandConfig.h` | ✅ Complete — 36 bands, FT8 table |
 | Radio control | `RadioController.h/.cpp` | ✅ Complete — AM/FM/SW/LW/SSB/CW |
 | Software SSB | `SoftSSBDemod.h/.cpp` | ✅ Complete — DDS BFO + biquad LPF |
-| Audio capture | `AudioCapture.h/.cpp` | ✅ Complete — ADC DMA, SSB hook |
+| Audio capture | `AudioCapture.h/.cpp` | ✅ Complete — ADC DMA, ADC cal, IIR DC-blocker |
 | FFT waterfall | `FFTProcessor.h/.cpp` | ✅ Complete — PSRAM buffers |
-| WebSocket server | `WebSocketHandler.h/.cpp` | ✅ Complete |
-| REST API | `WebServer.cpp` | ✅ Complete |
-| Local TFT display | `DisplayManager.h/.cpp` | ✅ Complete |
-| Encoder input | `EncoderHandler.h/.cpp` | ✅ Complete |
+| WebSocket server | `WebSocketHandler.h/.cpp` | ✅ Complete — idle throttle |
+| REST API / NTP | `WebServer.cpp` | ✅ Complete — NTP, modem sleep, deferred reboot |
+| Local TFT display | `DisplayManager.h/.cpp` | ✅ Complete — S-meter, auto-dim/sleep |
+| Encoder input | `EncoderHandler.h/.cpp` | ✅ Complete — wakes display on input |
 | FreeRTOS main | `main.cpp` | ✅ Complete |
 | Web UI HTML/CSS | `index.html`, `style.css` | ✅ Complete |
 | Audio player | `audio.js` | ✅ Complete — AudioWorklet + browser BFO |
 | Waterfall renderer | `waterfall.js` | ✅ Complete — 3 palettes |
-| FT8 decoder | `ft8.js` | ✅ Complete — UTC slot alignment |
-| UI controller | `app.js` | ✅ Complete |
+| FT8/JS8Call decoder | `ft8.js` | ✅ Complete — NTP UTC alignment, 4 slot modes |
+| UI controller | `app.js` | ✅ Complete — S-meter, NTP status, slot mode |
 
 ---
 
