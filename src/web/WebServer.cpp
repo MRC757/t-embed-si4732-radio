@@ -454,7 +454,7 @@ static void handleSetNtp(AsyncWebServerRequest* req, uint8_t* data,
 
 // GET /wifi — setup page
 static void handleWifiPage(AsyncWebServerRequest* req) {
-    req->send_P(200, "text/html", WIFI_SETUP_HTML);
+    req->send(200, "text/html", WIFI_SETUP_HTML);
 }
 
 // GET /wifi/scan — return cached scan JSON, trigger fresh scan
