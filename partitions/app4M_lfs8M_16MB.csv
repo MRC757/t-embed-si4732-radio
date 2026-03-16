@@ -1,0 +1,17 @@
+# T-Embed SI4732 Partition Table — 16MB Flash
+# Revised: 4MB per OTA app slot (up from 3MB), ~8MB LittleFS
+# No FT8 recording — LittleFS used for web UI + ft8_lib.wasm only
+#
+# Layout (16MB total):
+#   nvs      20KB   — non-volatile settings storage
+#   otadata   8KB   — OTA state tracking
+#   app0      4MB   — main firmware (OTA slot 0)
+#   app1      4MB   — OTA update slot (slot 1)
+#   spiffs   ~8MB   — LittleFS: web UI, ft8_lib.wasm (~600KB used)
+#
+# Name,   Type, SubType, Offset,    Size,     Flags
+nvs,      data, nvs,     0x9000,    0x5000,
+otadata,  data, ota,     0xe000,    0x2000,
+app0,     app,  ota_0,   0x10000,   0x400000,
+app1,     app,  ota_1,   0x410000,  0x400000,
+spiffs,   data, spiffs,  0x810000,  0x7F0000,

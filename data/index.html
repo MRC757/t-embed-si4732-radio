@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>T-Embed SI4732 Web Radio</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- ========================================================
+       HEADER
+  ======================================================== -->
+  <header>
+    <div id="header-left">
+      <span id="connection-dot" class="dot dot-disconnected" title="WebSocket status"></span>
+      <span id="connection-label">Connecting…</span>
+    </div>
+    <div id="header-center">T-Embed SI4732</div>
+    <div id="header-right">
+      <span id="bat-display" title="Battery">&#128267;</span>
+      <span id="wifi-display">&#128246;</span>
+    </div>
+  </header>
+
+  <!-- ========================================================
+       FREQUENCY DISPLAY
+  ======================================================== -->
+  <section id="freq-section">
+    <div id="freq-display">
+      <span id="freq-value">---</span>
+      <span id="freq-unit">MHz</span>
+    </div>
+    <div id="mode-band-row">
+      <span id="mode-badge" class="badge">FM</span>
+      <span id="band-label">FM</span>
+      <span id="stereo-badge" class="badge badge-stereo hidden">STEREO</span>
+      <span id="rds-name" class="rds-text"></span>
+    </div>
+    <div id="rds-info"></div>
+  </section>
+
+  <!-- ========================================================
+       SIGNAL METERS
+  ======================================================== -->
+  <section id="meters-section">
+    <div class="meter-row">
+      <span class="meter-label">RSSI</span>
+      <div class="meter-bar-bg">
+        <div id="rssi-bar" class="meter-bar meter-rssi"></div>
+      </div>
+      <span id="rssi-value" class="meter-value">0</span>
+    </div>
+    <div class="meter-row">
+      <span class="meter-label">SNR</span>
+      <div class="meter-bar-bg">
+        <div id="snr-bar" class="meter-bar meter-snr"></div>
+      </div>
+      <span id="snr-value" class="meter-value">0</span>
+    </div>
+  </section>
+
+  <!-- ========================================================
+       WATERFALL
+  ======================================================== -->
+  <section id="waterfall-section">
+    <div id="waterfall-header">
+      <span>Spectrum</span>
+      <span id="waterfall-range">0 – 8000 Hz</span>
+      <label class="toggle-label">
+        <input type="checkbox" id="waterfall-enabled" checked> Live
+      </label>
+    </div>
+    <canvas id="waterfall-canvas" width="512" height="200"></canvas>
+  </section>
+
+  <!-- ========================================================
+       CONTROLS
+  ======================================================== -->
+  <section id="controls-section">
+
+    <!-- Tuning row -->
+    <div class="control-row">
+      <button id="btn-seek-down" class="btn btn-secondary" title="Seek down">&#9664;&#9664;</button>
+      <button id="btn-step-down" class="btn btn-secondary" title="Step down">&#9664;</button>
+      <input type="number" id="freq-input" class="freq-input" placeholder="Frequency kHz" step="1">
+      <button id="btn-tune" class="btn btn-primary">Tune</button>
+      <button id="btn-step-up" class="btn btn-secondary" title="Step up">&#9654;</button>
+      <button id="btn-seek-up" class="btn btn-secondary" title="Seek up">&#9654;&#9654;</button>
+    </div>
+
+    <!-- Mode row -->
+    <div class="control-row" id="mode-row">
+      <span class="control-label">Mode:</span>
+      <div class="btn-group" id="mode-buttons">
+        <button class="btn btn-mode active" data-mode="FM">FM</button>
+        <button class="btn btn-mode" data-mode="AM">AM</button>
+        <button class="btn btn-mode" data-mode="USB">USB</button>
+        <button class="btn btn-mode" data-mode="LSB">LSB</button>
+        <button class="btn btn-mode" data-mode="CW">CW</button>
+      </div>
+    </div>
+
+    <!-- Band selector -->
+    <div class="control-row">
+      <span class="control-label">Band:</span>
+      <select id="band-select"></select>
+    </div>
+
+    <!-- Volume + AGC row -->
+    <div class="control-row">
+      <span class="control-label">Vol:</span>
+      <input type="range" id="volume-slider" min="0" max="63" value="40" class="slider">
+      <span id="volume-value" class="slider-value">40</span>
+      <label class="toggle-label" title="Automatic Gain Control">
+        <input type="checkbox" id="agc-toggle" checked> AGC
+      </label>
+    </div>
+
+    <!-- BFO row (shown only in SSB/CW) -->
+    <div class="control-row" id="bfo-row" style="display:none">
+      <span class="control-label">BFO:</span>
+      <input type="range" id="bfo-slider" min="-3000" max="3000" value="0" class="slider">
+      <span id="bfo-value" class="slider-value">0 Hz</span>
+      <button id="btn-bfo-reset" class="btn btn-secondary btn-small">Reset</button>
+    </div>
+
+  </section>
+
+  <!-- ========================================================
+       AUDIO PLAYER
+  ======================================================== -->
+  <section id="audio-section">
+    <div id="audio-controls">
+      <button id="btn-audio-play" class="btn btn-primary" title="Start audio">
+        &#9654; Start Audio
+      </button>
+      <button id="btn-audio-stop" class="btn btn-secondary hidden" title="Stop audio">
+        &#9646;&#9646; Stop
+      </button>
+      <span id="audio-status" class="audio-status">Click Start Audio to begin streaming</span>
+      <span id="audio-latency" class="audio-latency"></span>
+    </div>
+  </section>
+
+  <!-- ========================================================
+       FT8 DECODER
+  ======================================================== -->
+  <section id="ft8-section">
+    <div id="ft8-header">
+      <span class="section-title">FT8 / Digital Decoder</span>
+      <div id="ft8-quick-tune">
+        <span class="control-label">Quick:</span>
+        <div id="ft8-freq-buttons"></div>
+      </div>
+    </div>
+
+    <div id="ft8-controls">
+      <button id="btn-ft8-start" class="btn btn-primary">Start FT8</button>
+      <button id="btn-ft8-stop" class="btn btn-secondary hidden">Stop FT8</button>
+      <span id="ft8-status" class="ft8-status">Ready — tune to an FT8 frequency then press Start</span>
+      <span id="ft8-slot-timer" class="ft8-timer"></span>
+    </div>
+
+    <div id="ft8-log-header">
+      <span>Decoded Messages</span>
+      <button id="btn-ft8-clear" class="btn btn-secondary btn-small">Clear</button>
+    </div>
+    <div id="ft8-log"></div>
+  </section>
+
+  <!-- ========================================================
+       FOOTER / STATUS
+  ======================================================== -->
+  <footer>
+    <span id="footer-ssb">SSB: checking…</span>
+    <span id="footer-dropped">Dropped: 0</span>
+    <span id="footer-ts"></span>
+  </footer>
+
+  <!-- ========================================================
+       SCRIPTS — order matters
+  ======================================================== -->
+  <script src="/js/audio.js"></script>
+  <script src="/js/waterfall.js"></script>
+  <script src="/js/ft8.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

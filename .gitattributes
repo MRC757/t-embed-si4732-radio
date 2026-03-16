@@ -1,0 +1,11 @@
+# Normalise line endings to LF in the repo; checkout as-is on all platforms
+* text=auto eol=lf
+
+# Binary files — no line-ending translation
+*.jpeg binary
+*.jpg  binary
+*.png  binary
+*.ico  binary
+*.wasm binary
+*.bin  binary
+*.csv  text eol=lf
