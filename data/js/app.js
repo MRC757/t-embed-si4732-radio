@@ -121,6 +121,13 @@ function applyStatus(s) {
     sampleRate:   s.sampleRate ?? state.sampleRate,
   });
 
+  // Feed ESP32 UTC timestamp into FT8 decoder for accurate slot alignment.
+  // Status frames arrive every ~500ms, continuously refreshing the reference.
+  if (s.utcMs) {
+    ft8Decoder.setNtpReference(s.utcMs, Date.now());
+    updateNtpStatus(s.ntpSynced, s.utcMs);
+  }
+
   updateFrequencyDisplay();
   updateModeButtons();
   updateMeters();
@@ -231,6 +238,31 @@ function updateFooter(s) {
   document.getElementById('footer-ssb').textContent  = 'SSB: software (no patch)';
   document.getElementById('footer-dropped').textContent = 'Dropped: ' + (s.dropped ?? 0);
   document.getElementById('footer-ts').textContent   = new Date().toLocaleTimeString();
+}
+
+function updateNtpStatus(synced, utcMs) {
+  const el = document.getElementById('ntp-status');
+  if (!el) return;
+  if (synced && utcMs) {
+    const t = new Date(utcMs);
+    const hms = t.toISOString().slice(11, 19); // HH:MM:SS
+    el.textContent = 'Synced ' + hms + ' UTC';
+    el.className = 'ntp-status ntp-synced';
+  } else {
+    el.textContent = 'Not synced — connect to internet or sync manually';
+    el.className = 'ntp-status ntp-unsynced';
+  }
+}
+
+// Load current NTP server from device and show sync state
+async function loadNtpSettings() {
+  try {
+    const res = await fetch('/api/ntp');
+    const d   = await res.json();
+    const inp = document.getElementById('ntp-server');
+    if (inp) inp.value = d.server || 'pool.ntp.org';
+    updateNtpStatus(d.synced, d.utcMs);
+  } catch (_) {}
 }
 
 function setConnectionStatus(status) {
@@ -396,6 +428,40 @@ function wireControls() {
     if (!e.target.checked) waterfall.clear();
   });
 
+  // NTP server save
+  document.getElementById('btn-ntp-save').addEventListener('click', async () => {
+    const srv = document.getElementById('ntp-server').value.trim();
+    const el  = document.getElementById('ntp-status');
+    if (!srv) return;
+    el.textContent = 'Saving…';
+    el.className   = 'ntp-status';
+    try {
+      const res = await fetch('/api/ntp', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ server: srv }),
+      });
+      const d = await res.json();
+      el.textContent = d.ok ? 'Saved — waiting for sync…' : ('Error: ' + (d.error || '?'));
+      el.className   = d.ok ? 'ntp-status' : 'ntp-status ntp-unsynced';
+    } catch (e) {
+      el.textContent = 'Error: ' + e.message;
+      el.className   = 'ntp-status ntp-unsynced';
+    }
+  });
+
+  // FT8 manual sync — snap decoder slot boundary to current moment.
+  // Useful when NTP is unavailable: press at the instant you hear
+  // the first FT8 tones to align the 15-second buffer window.
+  document.getElementById('btn-ft8-sync').addEventListener('click', () => {
+    if (!ft8Decoder.isRunning) {
+      document.getElementById('ft8-status').textContent =
+        'Start FT8 first, then press Sync Now when you hear the signal.';
+      return;
+    }
+    ft8Decoder.manualSync();
+  });
+
   // FT8 start
   document.getElementById('btn-ft8-start').addEventListener('click', async () => {
     const statusEl = document.getElementById('ft8-status');
@@ -457,6 +523,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   wireControls();
   await loadBandSelectorFallback();
   await loadFT8Freqs();
+  await loadNtpSettings();
   connectWebSockets();
   console.log('[App] T-Embed SI4732 Web Radio ready.');
 });

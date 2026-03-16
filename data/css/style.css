@@ -518,6 +518,34 @@ footer {
   font-family: var(--font-mono);
 }
 
+/* ── NTP status ───────────────────────────────────────────── */
+.text-input {
+  background: var(--bg-control);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  width: 190px;
+  outline: none;
+}
+
+.text-input:focus { border-color: var(--accent); }
+
+.ntp-status {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ntp-synced   { color: var(--green); }
+.ntp-unsynced { color: var(--yellow); }
+
 /* ── Utility ──────────────────────────────────────────────── */
 .hidden { display: none !important; }
 

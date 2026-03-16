@@ -154,9 +154,20 @@
       </div>
     </div>
 
+    <!-- NTP time sync settings -->
+    <div class="control-row" id="ntp-row">
+      <span class="control-label" style="width:auto;margin-right:4px">NTP:</span>
+      <input type="text" id="ntp-server" class="text-input" placeholder="pool.ntp.org"
+             title="NTP server address — leave blank for pool.ntp.org">
+      <button id="btn-ntp-save" class="btn btn-secondary btn-small">Set</button>
+      <span id="ntp-status" class="ntp-status ntp-unsynced">checking…</span>
+    </div>
+
     <div id="ft8-controls">
       <button id="btn-ft8-start" class="btn btn-primary">Start FT8</button>
       <button id="btn-ft8-stop" class="btn btn-secondary hidden">Stop FT8</button>
+      <button id="btn-ft8-sync" class="btn btn-secondary"
+              title="Snap the 15-second slot boundary to right now. Press when you hear the first FT8 tones — useful when NTP is unavailable.">Sync Now</button>
       <span id="ft8-status" class="ft8-status">Ready — tune to an FT8 frequency then press Start</span>
       <span id="ft8-slot-timer" class="ft8-timer"></span>
     </div>

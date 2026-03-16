@@ -115,6 +115,14 @@ class FT8Decoder {
     this._running        = false;
     this._wasmReady      = false;
 
+    // ── NTP clock correction ──────────────────────────────────
+    // When a status frame arrives with utcMs, we record the ESP32's
+    // UTC epoch ms and the local Date.now() at that instant.
+    // _correctedNow() then returns: espUtcMs + (Date.now() - localMs)
+    // This corrects for browser clock skew independently of internet access.
+    this._ntpRefEspMs   = 0;   // utcMs from last NTP-synced status frame
+    this._ntpRefLocalMs = 0;   // Date.now() when that frame was received
+
     // ── Slot alignment state ─────────────────────────────────
     // When start() is called, we note the NEXT complete UTC 15s
     // boundary and discard all audio until that moment.
@@ -132,6 +140,45 @@ class FT8Decoder {
     this._onMessage    = null;
     this._onStatus     = null;
     this._timerHandle  = null;
+  }
+
+  // ----------------------------------------------------------
+  // setNtpReference(espUtcMs, receiveMs)
+  //   Called by app.js every time a status frame with utcMs arrives.
+  //   espUtcMs — the ESP32's gettimeofday epoch ms (NTP-corrected).
+  //   receiveMs — Date.now() at the moment the frame was received.
+  // ----------------------------------------------------------
+  setNtpReference(espUtcMs, receiveMs) {
+    this._ntpRefEspMs   = espUtcMs;
+    this._ntpRefLocalMs = receiveMs;
+  }
+
+  // ----------------------------------------------------------
+  // _correctedNow()
+  //   Best estimate of current UTC epoch ms.
+  //   Uses NTP reference when available; falls back to Date.now().
+  // ----------------------------------------------------------
+  _correctedNow() {
+    if (this._ntpRefEspMs === 0) return Date.now();
+    return this._ntpRefEspMs + (Date.now() - this._ntpRefLocalMs);
+  }
+
+  // ----------------------------------------------------------
+  // manualSync()
+  //   Snaps the slot boundary to the current moment.
+  //   Use when you hear the very first tone of an FT8 transmission
+  //   and NTP is not available — the decoder will start buffering
+  //   from that instant and decode the following 15-second slot.
+  // ----------------------------------------------------------
+  manualSync() {
+    const now = this._correctedNow();
+    this._waitingForBoundary = false;
+    this._firstBoundaryMs    = now;
+    this._slotStartMs        = now;
+    this._bufferFill         = 0;
+    this._audioBuffer        = new Float32Array(FT8_SAMPLES);
+    this._onStatus?.('Manual sync — slot boundary set to now, buffering…');
+    console.log('[FT8] Manual sync at', new Date(now).toISOString());
   }
 
   // ----------------------------------------------------------
@@ -187,7 +234,7 @@ class FT8Decoder {
     this._waitingForBoundary = true;
 
     // Next complete 15s UTC boundary, at least 1s away
-    const now  = Date.now();
+    const now  = this._correctedNow();
     const slot = Math.ceil((now + 1000) / (FT8_SLOT_S * 1000));
     this._firstBoundaryMs = slot * FT8_SLOT_S * 1000;
     this._slotStartMs     = this._firstBoundaryMs;
@@ -236,7 +283,7 @@ class FT8Decoder {
 
     // Phase 1: wait for the slot boundary
     if (this._waitingForBoundary) {
-      if (Date.now() < this._firstBoundaryMs) return; // still waiting
+      if (this._correctedNow() < this._firstBoundaryMs) return; // still waiting
       // Boundary reached — switch to accumulation phase
       this._waitingForBoundary = false;
       this._slotStartMs        = this._firstBoundaryMs;
@@ -270,7 +317,7 @@ class FT8Decoder {
   // ----------------------------------------------------------
   _tick() {
     if (!this._running) return;
-    const now = Date.now();
+    const now = this._correctedNow();
 
     if (this._waitingForBoundary) {
       const msLeft = this._firstBoundaryMs - now;
@@ -339,6 +386,7 @@ class FT8Decoder {
   get isRunning()   { return this._running; }
   get wasmReady()   { return this._wasmReady; }
   get decodeCount() { return this._decodeCount; }
+  get ntpSynced()   { return this._ntpRefEspMs > 0; }
 }
 
 const ft8Decoder = new FT8Decoder();

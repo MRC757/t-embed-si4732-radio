@@ -6,7 +6,9 @@
 #include "../dsp/FFTProcessor.h"
 #include "../radio/RadioController.h"
 #include "../radio/BandConfig.h"
+#include "../web/WebServer.h"
 #include <esp_log.h>
+#include <time.h>
 
 static const char* TAG = "WSHandler";
 
@@ -248,6 +250,16 @@ void WebSocketHandler::_buildStatusJson(JsonDocument& doc) {
     doc["ts"]          = millis();
 
     radioController.unlockStatus();
+
+    // UTC timestamp — lets the browser correct its own clock for FT8 slot alignment.
+    // Only included when NTP has synchronised; browser falls back to Date.now() otherwise.
+    bool ntpSynced = isNtpSynced();
+    doc["ntpSynced"] = ntpSynced;
+    if (ntpSynced) {
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        doc["utcMs"] = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
 
     // Add band table on first connect (type="status" → browser checks for bandTable)
     JsonArray bands = doc["bands"].to<JsonArray>();

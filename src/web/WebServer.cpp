@@ -26,6 +26,8 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <esp_log.h>
+#include <esp_sntp.h>
+#include <time.h>
 
 static const char* TAG = "WebServer";
 
@@ -36,6 +38,34 @@ static DNSServer      dnsServer;
 static bool           _captivePortalActive = false;
 static bool           _staConnected        = false;
 static String         _apIP;
+
+// ============================================================
+// NTP helpers — server stored in NVS namespace "ntp"
+// ============================================================
+static String _ntpServer;
+
+static String loadNtpServer() {
+    Preferences p;
+    p.begin("ntp", true);
+    String s = p.getString("server", "pool.ntp.org");
+    p.end();
+    return s;
+}
+
+static void saveNtpServer(const String& srv) {
+    Preferences p;
+    p.begin("ntp", false);
+    p.putString("server", srv);
+    p.end();
+}
+
+// Returns true if the system clock has been set to a plausible UTC value.
+// configTime() syncs async; we just check the result of gettimeofday.
+bool isNtpSynced() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return tv.tv_sec > 1577836800L; // after 2020-01-01 00:00 UTC
+}
 
 // ============================================================
 // Captive portal — Wi-Fi setup page (embedded, no LittleFS needed)
@@ -200,6 +230,9 @@ static void redirectToPortal(AsyncWebServerRequest* req) {
 // Wi-Fi init — AP+STA simultaneous, captive portal fallback
 // ============================================================
 static void wifiBegin() {
+    // Load NTP server early so the GET endpoint works even in portal mode
+    _ntpServer = loadNtpServer();
+
     // AP always starts first so device is reachable immediately
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_SSID, AP_PASS);
@@ -245,6 +278,10 @@ static void wifiBegin() {
     _staConnected = true;
     ESP_LOGI(TAG, "STA connected. STA IP=%s  AP IP=%s",
              WiFi.localIP().toString().c_str(), _apIP.c_str());
+
+    // Start NTP synchronisation (async — result available via isNtpSynced())
+    configTime(0, 0, _ntpServer.c_str(), "time.nist.gov");
+    ESP_LOGI(TAG, "NTP sync started: %s", _ntpServer.c_str());
 }
 
 // ============================================================
@@ -349,6 +386,50 @@ static void handleGetFT8Freqs(AsyncWebServerRequest* req) {
 }
 
 // ============================================================
+// NTP handlers
+// ============================================================
+
+// GET /api/ntp — current server, sync state, and UTC timestamp
+static void handleGetNtp(AsyncWebServerRequest* req) {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    bool synced = isNtpSynced();
+
+    JsonDocument doc;
+    doc["server"] = _ntpServer;
+    doc["synced"]  = synced;
+    doc["staUp"]   = _staConnected;
+    if (synced) {
+        doc["utcMs"] = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
+    String body;
+    serializeJson(doc, body);
+    req->send(200, "application/json", body);
+}
+
+// POST /api/ntp  body: { "server": "pool.ntp.org" }
+static void handleSetNtp(AsyncWebServerRequest* req, uint8_t* data,
+                          size_t len, size_t, size_t) {
+    JsonDocument doc;
+    if (deserializeJson(doc, data, len)) {
+        req->send(400, "application/json", "{\"error\":\"bad JSON\"}"); return;
+    }
+    const char* srv = doc["server"] | "";
+    if (!srv || strlen(srv) == 0) {
+        req->send(400, "application/json", "{\"error\":\"server required\"}"); return;
+    }
+    saveNtpServer(srv);
+    _ntpServer = srv;
+    if (_staConnected) {
+        configTime(0, 0, _ntpServer.c_str(), "time.nist.gov");
+        ESP_LOGI(TAG, "NTP server updated: %s — re-syncing", srv);
+    } else {
+        ESP_LOGI(TAG, "NTP server saved: %s (not connected — will sync on next STA connect)", srv);
+    }
+    req->send(200, "application/json", "{\"ok\":true}");
+}
+
+// ============================================================
 // Captive portal handlers
 // ============================================================
 
@@ -432,6 +513,9 @@ void webServerBegin() {
     httpServer.on("/api/status",   HTTP_GET,  handleGetStatus);
     httpServer.on("/api/bands",    HTTP_GET,  handleGetBands);
     httpServer.on("/api/ft8freqs", HTTP_GET,  handleGetFT8Freqs);
+    httpServer.on("/api/ntp",      HTTP_GET,  handleGetNtp);
+    httpServer.on("/api/ntp",      HTTP_POST,
+        [](AsyncWebServerRequest* r){}, nullptr, handleSetNtp);
     httpServer.on("/api/tune",     HTTP_POST,
         [](AsyncWebServerRequest* r){}, nullptr, handleTune);
     httpServer.on("/api/mode",     HTTP_POST,
