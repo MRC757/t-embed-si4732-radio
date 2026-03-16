@@ -182,12 +182,20 @@ function updateModeButtons() {
   });
 }
 
+// Convert RSSI (dBμV) to S-meter label.
+// Reference: S9 = 34 dBμV (HF), each S-unit = 6 dB.
+function rssiToSmeter(rssi) {
+  const sUnits = Math.max(0, Math.min(9, 9 + Math.floor((rssi - 34) / 6)));
+  const above  = rssi - 34;
+  return above > 0 ? 'S9+' + above : 'S' + sUnits;
+}
+
 function updateMeters() {
   const rPct = Math.min(100, (state.rssi / 80) * 100);
   const sPct = Math.min(100, (state.snr  / 50) * 100);
   document.getElementById('rssi-bar').style.width   = rPct + '%';
   document.getElementById('snr-bar').style.width    = sPct + '%';
-  document.getElementById('rssi-value').textContent = state.rssi;
+  document.getElementById('rssi-value').textContent = rssiToSmeter(state.rssi);
   document.getElementById('snr-value').textContent  = state.snr;
 }
 
@@ -287,7 +295,7 @@ function populateBandSelector(bands) {
   sel.innerHTML = '';
   bands.forEach((b, i) => {
     const opt = document.createElement('option');
-    opt.value       = i;
+    opt.value       = b.index ?? i;
     opt.textContent = b.name + '  (' + b.mode + ')';
     sel.appendChild(opt);
   });
@@ -448,6 +456,11 @@ function wireControls() {
       el.textContent = 'Error: ' + e.message;
       el.className   = 'ntp-status ntp-unsynced';
     }
+  });
+
+  // Decoder mode (FT8 / JS8Call slot duration)
+  document.getElementById('decoder-mode').addEventListener('change', e => {
+    ft8Decoder.setSlotMode(e.target.value);
   });
 
   // FT8 manual sync — snap decoder slot boundary to current moment.

@@ -19,9 +19,17 @@
 
 'use strict';
 
-const FT8_SLOT_S  = 15;
 const AUDIO_RATE  = 16000;
-const FT8_SAMPLES = FT8_SLOT_S * AUDIO_RATE;   // 240,000 samples per slot
+
+// Slot durations in seconds for each decoder mode.
+// FT8 uses the 15-second UTC grid (standard).
+// JS8Call supports 6 s (Fast), 10 s (Normal), and 30 s (Slow) variants.
+const SLOT_MODES = {
+  'FT8':       15,
+  'JS8-Fast':   6,
+  'JS8-Normal': 10,
+  'JS8-Slow':  30,
+};
 
 // ============================================================
 // Web Worker (inlined as Blob — no separate LittleFS upload)
@@ -115,6 +123,11 @@ class FT8Decoder {
     this._running        = false;
     this._wasmReady      = false;
 
+    // ── Slot mode ─────────────────────────────────────────────
+    // Defaults to FT8 (15 s). Call setSlotMode() to switch.
+    this._slotSec        = SLOT_MODES['FT8'];
+    this._slotSamples    = this._slotSec * AUDIO_RATE;
+
     // ── NTP clock correction ──────────────────────────────────
     // When a status frame arrives with utcMs, we record the ESP32's
     // UTC epoch ms and the local Date.now() at that instant.
@@ -124,14 +137,13 @@ class FT8Decoder {
     this._ntpRefLocalMs = 0;   // Date.now() when that frame was received
 
     // ── Slot alignment state ─────────────────────────────────
-    // When start() is called, we note the NEXT complete UTC 15s
-    // boundary and discard all audio until that moment.
-    // This prevents misaligned first-slot decode failures.
+    // When start() is called, we note the NEXT complete UTC boundary
+    // (aligned to this._slotSec) and discard all audio until that moment.
     this._waitingForBoundary = false;  // true = discarding pre-boundary audio
     this._firstBoundaryMs    = 0;      // epoch ms of the next UTC boundary
 
     // ── Audio accumulation ────────────────────────────────────
-    this._audioBuffer  = new Float32Array(FT8_SAMPLES);
+    this._audioBuffer  = new Float32Array(this._slotSamples);
     this._bufferFill   = 0;
     this._slotStartMs  = 0;    // epoch ms of the slot currently being filled
 
@@ -140,6 +152,31 @@ class FT8Decoder {
     this._onMessage    = null;
     this._onStatus     = null;
     this._timerHandle  = null;
+  }
+
+  // ----------------------------------------------------------
+  // setSlotMode(name)
+  //   Switch slot duration. 'FT8' | 'JS8-Fast' | 'JS8-Normal' | 'JS8-Slow'
+  //   Can be called before or after start(). If the decoder is running,
+  //   the change takes effect at the next slot boundary.
+  // ----------------------------------------------------------
+  setSlotMode(name) {
+    const sec = SLOT_MODES[name];
+    if (!sec) { console.warn('[FT8] Unknown slot mode:', name); return; }
+    this._slotSec     = sec;
+    this._slotSamples = sec * AUDIO_RATE;
+    this._onStatus?.(`Slot mode → ${name} (${sec}s)`);
+    console.log('[FT8] Slot mode:', name, sec + 's');
+    // Reset buffers for the new slot size; slot alignment restarts automatically.
+    if (this._running) {
+      this._bufferFill  = 0;
+      this._audioBuffer = new Float32Array(this._slotSamples);
+      this._waitingForBoundary = true;
+      const now  = this._correctedNow();
+      const slot = Math.ceil((now + 500) / (this._slotSec * 1000));
+      this._firstBoundaryMs = slot * this._slotSec * 1000;
+      this._slotStartMs     = this._firstBoundaryMs;
+    }
   }
 
   // ----------------------------------------------------------
@@ -176,7 +213,7 @@ class FT8Decoder {
     this._firstBoundaryMs    = now;
     this._slotStartMs        = now;
     this._bufferFill         = 0;
-    this._audioBuffer        = new Float32Array(FT8_SAMPLES);
+    this._audioBuffer        = new Float32Array(this._slotSamples);
     this._onStatus?.('Manual sync — slot boundary set to now, buffering…');
     console.log('[FT8] Manual sync at', new Date(now).toISOString());
   }
@@ -230,18 +267,18 @@ class FT8Decoder {
     this._currentFreq        = currentFreqKHz;
     this._running            = true;
     this._bufferFill         = 0;
-    this._audioBuffer        = new Float32Array(FT8_SAMPLES);
+    this._audioBuffer        = new Float32Array(this._slotSamples);
     this._waitingForBoundary = true;
 
-    // Next complete 15s UTC boundary, at least 1s away
+    // Next complete UTC slot boundary aligned to this._slotSec, at least 1s away
     const now  = this._correctedNow();
-    const slot = Math.ceil((now + 1000) / (FT8_SLOT_S * 1000));
-    this._firstBoundaryMs = slot * FT8_SLOT_S * 1000;
+    const slot = Math.ceil((now + 1000) / (this._slotSec * 1000));
+    this._firstBoundaryMs = slot * this._slotSec * 1000;
     this._slotStartMs     = this._firstBoundaryMs;
 
     const waitS = ((this._firstBoundaryMs - now) / 1000).toFixed(1);
     this._onStatus?.(
-      `Waiting for slot boundary in ${waitS}s — first decode in ~${(parseFloat(waitS) + FT8_SLOT_S).toFixed(0)}s`
+      `Waiting for slot boundary in ${waitS}s — first decode in ~${(parseFloat(waitS) + this._slotSec).toFixed(0)}s`
     );
     console.log('[FT8] Started. First boundary:',
       new Date(this._firstBoundaryMs).toISOString());
@@ -259,7 +296,7 @@ class FT8Decoder {
     clearInterval(this._timerHandle);
     this._timerHandle  = null;
     this._bufferFill   = 0;
-    this._audioBuffer  = new Float32Array(FT8_SAMPLES);
+    this._audioBuffer  = new Float32Array(this._slotSamples);
     this._onStatus?.('Stopped.');
     document.getElementById('ft8-slot-timer').textContent = '';
   }
@@ -294,7 +331,7 @@ class FT8Decoder {
 
     // Phase 2: accumulate
     const samples = new Int16Array(arrayBuffer, 4); // skip 4-byte timestamp
-    const space   = FT8_SAMPLES - this._bufferFill;
+    const space   = this._slotSamples - this._bufferFill;
     const toCopy  = Math.min(samples.length, space);
 
     for (let i = 0; i < toCopy; i++) {
@@ -327,13 +364,13 @@ class FT8Decoder {
     }
 
     const elapsed = (now - this._slotStartMs) / 1000;
-    const remaining = Math.max(0, FT8_SLOT_S - elapsed);
+    const remaining = Math.max(0, this._slotSec - elapsed);
 
     document.getElementById('ft8-slot-timer').textContent =
       'T-' + Math.ceil(remaining).toString().padStart(2, '0') + 's';
 
     // Submit when full slot has elapsed AND buffer has enough samples
-    if (elapsed >= FT8_SLOT_S && this._bufferFill >= FT8_SAMPLES * 0.8) {
+    if (elapsed >= this._slotSec && this._bufferFill >= this._slotSamples * 0.8) {
       this._submitDecode();
     }
   }
@@ -356,8 +393,8 @@ class FT8Decoder {
     console.log(`[FT8] Decode submitted: ${slotTime}, ${this._bufferFill} samples`);
 
     // Reset for next slot — advance slotStart by exactly one slot duration
-    this._slotStartMs += FT8_SLOT_S * 1000;
-    this._audioBuffer  = new Float32Array(FT8_SAMPLES);
+    this._slotStartMs += this._slotSec * 1000;
+    this._audioBuffer  = new Float32Array(this._slotSamples);
     this._bufferFill   = 0;
   }
 

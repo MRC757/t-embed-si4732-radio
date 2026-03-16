@@ -31,10 +31,13 @@ AudioCapture::AudioCapture()
     , _gain(1.0f)
     , _droppedSamples(0)
     , _taskHandle(nullptr)
+    , _dcX1(0.0f)
+    , _dcY1(0.0f)
     , _ringBuf(nullptr)
     , _writePos(0)
     , _readPos(0)
 {
+    memset(&_adcChars, 0, sizeof(_adcChars));
     _ringMutex = xSemaphoreCreateMutex();
     _dataReady = xSemaphoreCreateBinary();
     _taskDone  = xSemaphoreCreateBinary();
@@ -58,6 +61,19 @@ bool AudioCapture::begin() {
         return false;
     }
     memset(_ringBuf, 0, AUDIO_RING_CAPACITY * sizeof(int16_t));
+
+    // --- ADC calibration characterisation ---
+    // Corrects the ESP32-S3 SAR ADC INL bow (≈±50 LSB uncalibrated).
+    // esp_adc_cal_characterize() uses eFuse calibration values when present,
+    // otherwise falls back to ADC_VREF_MV (1100 mV).
+    esp_adc_cal_value_t calType = esp_adc_cal_characterize(
+        ADC_UNIT_1, AUDIO_ADC_ATTEN, ADC_WIDTH_BIT_12,
+        ADC_VREF_MV, &_adcChars
+    );
+    ESP_LOGI(TAG, "ADC cal: %s",
+        calType == ESP_ADC_CAL_VAL_EFUSE_VREF   ? "eFuse Vref" :
+        calType == ESP_ADC_CAL_VAL_EFUSE_TP     ? "eFuse two-point" :
+                                                   "default Vref");
 
     // --- Configure ADC Continuous Mode (ESP-IDF 4.4.x adc_digi_* API) ---
     // ESP32-S3 ADC1 Channel 6 = IO17 (PIN_SI4732_AUDIO)

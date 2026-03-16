@@ -282,21 +282,31 @@ void WebSocketHandler::streamTask(void* arg) {
 }
 
 void WebSocketHandler::_streamLoop() {
-    const TickType_t period = pdMS_TO_TICKS(20); // 50 Hz loop
     TickType_t lastWakeTime = xTaskGetTickCount();
+    static uint8_t wfCounter = 0;
 
     while (true) {
-        vTaskDelayUntil(&lastWakeTime, period);
+        // Throttle to 100 ms when no clients to reduce CPU/WiFi overhead.
+        // Reset lastWakeTime after idle sleep so the 20 ms cadence
+        // restarts cleanly when the first client connects.
+        if (audioClientCount() + radioClientCount() == 0) {
+            if (_wsAudio) _wsAudio->cleanupClients();
+            if (_wsRadio) _wsRadio->cleanupClients();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            lastWakeTime = xTaskGetTickCount();
+            continue;
+        }
+
+        vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(20)); // 50 Hz active loop
 
         // Clean up disconnected clients periodically
         if (_wsAudio) _wsAudio->cleanupClients();
         if (_wsRadio) _wsRadio->cleanupClients();
 
-        // Stream audio frames (~50 per second = 50 × 32ms chunks ahead of playback)
+        // Stream audio frames (~50 per second)
         broadcastAudioFrame();
 
         // Waterfall at ~10 fps (every 5th loop iteration)
-        static uint8_t wfCounter = 0;
         if (++wfCounter >= 5) {
             wfCounter = 0;
             broadcastWaterfallRow();

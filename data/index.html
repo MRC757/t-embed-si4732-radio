@@ -147,7 +147,7 @@
   ======================================================== -->
   <section id="ft8-section">
     <div id="ft8-header">
-      <span class="section-title">FT8 / Digital Decoder</span>
+      <span class="section-title">FT8 / JS8Call Decoder</span>
       <div id="ft8-quick-tune">
         <span class="control-label">Quick:</span>
         <div id="ft8-freq-buttons"></div>
@@ -163,8 +163,19 @@
       <span id="ntp-status" class="ntp-status ntp-unsynced">checking…</span>
     </div>
 
+    <!-- Decoder mode: slot duration for FT8 or JS8Call variants -->
+    <div class="control-row" id="decoder-mode-row">
+      <span class="control-label" style="width:auto;margin-right:6px">Slot:</span>
+      <select id="decoder-mode" class="freq-input" style="width:160px">
+        <option value="FT8">FT8  (15 s)</option>
+        <option value="JS8-Fast">JS8Call Fast  (6 s)</option>
+        <option value="JS8-Normal">JS8Call Normal  (10 s)</option>
+        <option value="JS8-Slow">JS8Call Slow  (30 s)</option>
+      </select>
+    </div>
+
     <div id="ft8-controls">
-      <button id="btn-ft8-start" class="btn btn-primary">Start FT8</button>
+      <button id="btn-ft8-start" class="btn btn-primary">Start Decoder</button>
       <button id="btn-ft8-stop" class="btn btn-secondary hidden">Stop FT8</button>
       <button id="btn-ft8-sync" class="btn btn-secondary"
               title="Snap the 15-second slot boundary to right now. Press when you hear the first FT8 tones — useful when NTP is unavailable.">Sync Now</button>

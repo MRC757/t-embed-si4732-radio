@@ -36,6 +36,7 @@
 // ============================================================
 #include <Arduino.h>
 #include "driver/adc.h"          // ESP-IDF 4.4.x ADC continuous (adc_digi_*)
+#include <esp_adc_cal.h>         // ADC nonlinearity calibration
 #include "../config/PinConfig.h"
 
 #define SPEAKER_SW_PASSTHROUGH  0   // 1 = route ADC samples to speaker I2S
@@ -44,13 +45,10 @@
 // Ring buffer: 4 seconds at 16kHz = 64k samples
 static constexpr size_t AUDIO_RING_CAPACITY = 65536; // power of 2
 
-// ADC raw DC offset at midpoint (1.65V / 3.3V × 4095 ≈ 2048)
-// Subtract this to centre the waveform at 0 for signed int16 output.
-static constexpr int16_t ADC_DC_OFFSET = 2048;
-
-// Scale factor: map 12-bit ADC (0–4095 signed after DC removal → ±2047)
-// to int16 full range (±32767). Multiply by 16.
-static constexpr float ADC_SCALE = 16.0f;
+// ADC calibration: reference voltage in mV for esp_adc_cal_characterize().
+// 1100 mV is the ESP32-S3 default eFuse reference; the driver uses eFuse
+// if available, falling back to this value.
+static constexpr uint32_t ADC_VREF_MV = 1100;
 
 class AudioCapture {
 public:
@@ -92,6 +90,15 @@ private:
     uint32_t                _droppedSamples;
     TaskHandle_t            _taskHandle;
 
+    // ADC calibration characteristics — populated by begin()
+    esp_adc_cal_characteristics_t _adcChars;
+
+    // IIR single-pole DC-blocking high-pass filter state
+    // Transfer function: y[n] = x[n] - x[n-1] + 0.9999 * y[n-1]
+    // Cutoff ≈ 0.16 Hz at 16 kHz — removes DC and 50/60 Hz hum below 1 Hz.
+    float _dcX1;
+    float _dcY1;
+
     // Ring buffer (allocated in PSRAM)
     int16_t*          _ringBuf;
     volatile size_t   _writePos;
@@ -103,10 +110,23 @@ private:
     void _captureLoop();
     void _writeSamplesToRing(const int16_t* samples, size_t count);
 
-    // Convert raw 12-bit ADC result to signed int16 PCM
+    // Convert raw 12-bit ADC result to calibrated, DC-blocked, signed int16 PCM.
+    // Uses esp_adc_cal_raw_to_voltage() to correct the ESP32-S3 ADC INL bow
+    // (±50 LSB typical without calibration).
     inline int16_t _adcToSample(uint16_t raw) {
-        int32_t s = (int32_t)(int16_t)(raw - ADC_DC_OFFSET);
-        s = (int32_t)(s * _gain * ADC_SCALE);
+        // Step 1: linearise ADC reading → millivolts (0–3300 mV range)
+        uint32_t mV = esp_adc_cal_raw_to_voltage(raw, &_adcChars);
+
+        // Step 2: IIR DC blocker — centre the signal at 0
+        // x is the AC-coupled input (centred on 1650 mV midpoint)
+        float x = (float)mV - 1650.0f;
+        float y = x - _dcX1 + 0.9999f * _dcY1;
+        _dcX1 = x;
+        _dcY1 = y;
+
+        // Step 3: scale to int16 with software gain
+        // 1650.0f maps the full ±3.3V swing to ±full-scale
+        int32_t s = (int32_t)(y * _gain * (32767.0f / 1650.0f));
         return (int16_t)constrain(s, -32768, 32767);
     }
 };

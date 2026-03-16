@@ -7,6 +7,7 @@
 // ============================================================
 #include "EncoderHandler.h"
 #include "../radio/RadioController.h"
+#include "../display/DisplayManager.h"
 #include "../config/PinConfig.h"
 #include <ESP32Encoder.h>
 #include <esp_log.h>
@@ -71,6 +72,7 @@ void EncoderHandler::_inputLoop() {
             // Pressed
             btnPressMs = now;
             longPressHandled = false;
+            displayManager.wakeDisplay();
         }
 
         if (btnNow && btnLastState) {
@@ -120,6 +122,8 @@ void EncoderHandler::_handleEncoderDelta(int delta) {
     // Normalise: encoder half-quad gives 2 counts per detent
     int steps = delta / 2;
     if (steps == 0) return;
+
+    displayManager.wakeDisplay();
 
     switch (currentTarget) {
         case Target::FREQUENCY:

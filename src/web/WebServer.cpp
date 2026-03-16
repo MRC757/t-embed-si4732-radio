@@ -27,6 +27,7 @@
 #include <ArduinoJson.h>
 #include <esp_log.h>
 #include <esp_sntp.h>
+#include <freertos/timers.h>
 #include <time.h>
 
 static const char* TAG = "WebServer";
@@ -59,12 +60,24 @@ static void saveNtpServer(const String& srv) {
     p.end();
 }
 
-// Returns true if the system clock has been set to a plausible UTC value.
-// configTime() syncs async; we just check the result of gettimeofday.
+// Flag set by SNTP notification callback — avoids polling gettimeofday
+// every status broadcast (avoids syscall overhead and clock-is-set ambiguity).
+static volatile bool _ntpSynced = false;
+
+static void _ntpSyncCb(struct timeval* tv) {
+    _ntpSynced = true;
+    ESP_LOGI(TAG, "NTP synchronised. UTC: %lld s", (long long)tv->tv_sec);
+}
+
 bool isNtpSynced() {
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    return tv.tv_sec > 1577836800L; // after 2020-01-01 00:00 UTC
+    return _ntpSynced;
+}
+
+// ============================================================
+// Deferred reboot timer — avoids blocking the async handler task
+// ============================================================
+static void _rebootTimerCb(TimerHandle_t) {
+    esp_restart();
 }
 
 // ============================================================
@@ -279,7 +292,11 @@ static void wifiBegin() {
     ESP_LOGI(TAG, "STA connected. STA IP=%s  AP IP=%s",
              WiFi.localIP().toString().c_str(), _apIP.c_str());
 
-    // Start NTP synchronisation (async — result available via isNtpSynced())
+    // Modem power save — reduces TX current ~30% at cost of ~1ms extra latency
+    WiFi.setSleep(true);
+
+    // Start NTP (async). Callback fires when first sync completes.
+    sntp_set_time_sync_notification_cb(_ntpSyncCb);
     configTime(0, 0, _ntpServer.c_str(), "time.nist.gov");
     ESP_LOGI(TAG, "NTP sync started: %s", _ntpServer.c_str());
 }
@@ -421,6 +438,8 @@ static void handleSetNtp(AsyncWebServerRequest* req, uint8_t* data,
     saveNtpServer(srv);
     _ntpServer = srv;
     if (_staConnected) {
+        _ntpSynced = false;  // force re-sync with new server
+        sntp_set_time_sync_notification_cb(_ntpSyncCb);
         configTime(0, 0, _ntpServer.c_str(), "time.nist.gov");
         ESP_LOGI(TAG, "NTP server updated: %s — re-syncing", srv);
     } else {
@@ -459,12 +478,14 @@ static void handleWifiSave(AsyncWebServerRequest* req, uint8_t* data,
         return;
     }
     saveCreds(ssid, pass);
-    ESP_LOGI(TAG, "Credentials saved for \"%s\" — rebooting", ssid);
+    ESP_LOGI(TAG, "Credentials saved for \"%s\" — rebooting in 3s", ssid);
     req->send(200, "application/json",
               "{\"ok\":true,\"msg\":\"Saved! Connecting in 3 seconds...\"}");
-    // Reboot after response is sent
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    esp_restart();
+    // Deferred restart — one-shot FreeRTOS timer fires OUTSIDE the async handler
+    // task, so the HTTP response above can be flushed to the client first.
+    TimerHandle_t t = xTimerCreate("reboot", pdMS_TO_TICKS(3000),
+                                   pdFALSE, nullptr, _rebootTimerCb);
+    if (t) xTimerStart(t, 0);
 }
 
 // Standard captive-portal detection endpoints — redirect to setup page.
