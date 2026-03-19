@@ -2,7 +2,7 @@
 // app.js — Main UI controller
 //
 // Manages two WebSocket connections:
-//   /ws/audio  — binary PCM frames -> audioPlayer + ft8Decoder
+//   /ws/audio  — binary PCM frames -> audioPlayer + ft8Decoder + js8Decoder + cwDecoder
 //   /ws/radio  — binary waterfall + JSON status
 //
 // All radio commands are sent as JSON over /ws/radio.
@@ -39,7 +39,7 @@ const state = {
   usbIn:         false,
   rdsName:       '',
   rdsProg:       '',
-  sampleRate:    16000,
+  sampleRate:    12000,
 };
 
 let ft8Freqs = [];
@@ -59,6 +59,8 @@ function connectWebSockets() {
     if (!(e.data instanceof ArrayBuffer)) return;
     if (audioPlayer.isRunning) audioPlayer.pushFrame(e.data);
     if (ft8Decoder.isRunning)  ft8Decoder.pushAudioFrame(e.data);
+    if (js8Decoder.isRunning)  js8Decoder.pushAudioFrame(e.data);
+    if (cwDecoder.isRunning)   cwDecoder.pushAudioFrame(e.data);
   };
   wsAudio.onclose = () => scheduleReconnect();
 
@@ -355,6 +357,27 @@ function appendFT8Messages(messages, slotTime) {
 }
 
 // ============================================================
+// JS8Call log display
+// ============================================================
+function appendJS8Messages(messages, slotTime) {
+  const log = document.getElementById('js8-log');
+  messages.forEach(m => {
+    const row   = document.createElement('div');
+    row.className = 'ft8-row';
+    const isCQ  = m.msg.toUpperCase().includes('CQ');
+    const snr   = (m.snr >= 0 ? '+' : '') + (m.snr || 0).toFixed(1);
+    const freq  = m.freq > 0 ? Math.round(m.freq) : '—';
+    row.innerHTML =
+      '<span class="ft8-time">'  + (m.time ?? slotTime) + '</span>' +
+      '<span class="ft8-snr">'   + snr  + '</span>' +
+      '<span class="ft8-dt">'    + freq + '</span>' +
+      '<span class="ft8-msg ' + (isCQ ? 'ft8-cq' : '') + '">' + m.msg + '</span>';
+    log.insertBefore(row, log.firstChild);
+  });
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+// ============================================================
 // UI event wiring
 // ============================================================
 function wireControls() {
@@ -402,6 +425,8 @@ function wireControls() {
     document.getElementById('bfo-value').textContent = (trim >= 0 ? '+' : '') + trim + ' Hz';
     sendCommand({ cmd: 'bfo', hz: trim });
     audioPlayer.setBrowserBFO(trim);
+    // Keep CW decoder locked to the actual pitch (700 Hz BFO + user trim)
+    cwDecoder.setBfoHz(700 + trim);
   });
   document.getElementById('btn-bfo-reset').addEventListener('click', () => {
     document.getElementById('bfo-slider').value = 0;
@@ -456,11 +481,6 @@ function wireControls() {
       el.textContent = 'Error: ' + e.message;
       el.className   = 'ntp-status ntp-unsynced';
     }
-  });
-
-  // Decoder mode (FT8 / JS8Call slot duration)
-  document.getElementById('decoder-mode').addEventListener('change', e => {
-    ft8Decoder.setSlotMode(e.target.value);
   });
 
   // FT8 manual sync — snap decoder slot boundary to current moment.
@@ -526,6 +546,62 @@ function wireControls() {
   // FT8 log clear
   document.getElementById('btn-ft8-clear').addEventListener('click', () => {
     document.getElementById('ft8-log').innerHTML = '';
+  });
+
+  // ── JS8Call decoder ──────────────────────────────────────
+
+  // JS8Call start
+  document.getElementById('btn-js8-start').addEventListener('click', async () => {
+    const statusEl = document.getElementById('js8-status');
+
+    if (!audioPlayer.isRunning) {
+      try {
+        await audioPlayer.start();
+        document.getElementById('btn-audio-play').classList.add('hidden');
+        document.getElementById('btn-audio-stop').classList.remove('hidden');
+        document.getElementById('audio-status').textContent =
+          'Streaming (started by JS8Call) - ' + state.sampleRate + ' Hz PCM';
+      } catch (err) {
+        statusEl.textContent = 'Audio error: ' + err.message;
+        return;
+      }
+    }
+
+    if (!js8Decoder._worker) {
+      statusEl.textContent = 'Loading JS8Call WASM…';
+      try {
+        await js8Decoder.init(
+          (msgs, slot) => appendJS8Messages(msgs, slot),
+          (msg)        => { statusEl.textContent = msg; }
+        );
+      } catch (err) {
+        statusEl.textContent = 'JS8Call init failed: ' + err.message;
+        return;
+      }
+    }
+
+    const modeId = parseInt(document.getElementById('js8-mode').value, 10);
+    js8Decoder.start(modeId);
+    document.getElementById('btn-js8-start').classList.add('hidden');
+    document.getElementById('btn-js8-stop').classList.remove('hidden');
+  });
+
+  // JS8Call stop
+  document.getElementById('btn-js8-stop').addEventListener('click', () => {
+    js8Decoder.stop();
+    document.getElementById('btn-js8-start').classList.remove('hidden');
+    document.getElementById('btn-js8-stop').classList.add('hidden');
+  });
+
+  // JS8Call mode change at runtime
+  document.getElementById('js8-mode').addEventListener('change', e => {
+    const modeId = parseInt(e.target.value, 10);
+    if (js8Decoder.isRunning) js8Decoder.setMode(modeId);
+  });
+
+  // JS8Call log clear
+  document.getElementById('btn-js8-clear').addEventListener('click', () => {
+    document.getElementById('js8-log').innerHTML = '';
   });
 }
 

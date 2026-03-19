@@ -36,9 +36,9 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     this._bfoPhaseInc = 0.0;  // = 2π × bfoHz / sampleRate
     this._lpfZ1       = 0.0;
     this._lpfZ2       = 0.0;
-    // One-pole LPF alpha for ~2.4 kHz cutoff at 16 kHz
-    // α = exp(-2π × fc / fs) = exp(-2π × 2400/16000) ≈ 0.3935
-    this._lpfAlpha    = 0.3935;
+    // One-pole LPF alpha for ~2.4 kHz cutoff at 12 kHz
+    // α = exp(-2π × fc / fs) = exp(-2π × 2400/12000) ≈ 0.2846
+    this._lpfAlpha    = 0.2846;
 
     this.port.onmessage = (e) => {
       if (e.data.type === 'init') {
@@ -114,8 +114,8 @@ class AudioPlayer {
     this._sab        = null;
     this._writePos   = null;
     this._buf        = null;
-    this._capacity   = 32768;   // ~2 s at 16 kHz
-    this._sampleRate = 16000;
+    this._capacity   = 32768;   // ~2.7 s at 12 kHz
+    this._sampleRate = 12000;
     this._latencyMs  = 0;
     this._framesRx   = 0;
   }

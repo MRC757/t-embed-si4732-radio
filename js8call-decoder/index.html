@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>JS8Call Decoder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #30363d;
+      --text:    #e6edf3;
+      --muted:   #8b949e;
+      --green:   #3fb950;
+      --amber:   #d29922;
+      --red:     #f85149;
+      --blue:    #58a6ff;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      min-height: 100vh;
+    }
+
+    h1 { font-size: 16px; font-weight: 500; margin-bottom: 14px; color: var(--text); }
+
+    /* ---- control bar ---- */
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .controls label { color: var(--muted); white-space: nowrap; }
+
+    input[type="url"], input[type="number"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 13px;
+      outline: none;
+    }
+    input[type="url"]    { width: 260px; }
+    input[type="number"] { width: 72px; }
+    input:focus { border-color: var(--blue); }
+
+    select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    button {
+      padding: 5px 14px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    #btn-connect { background: var(--blue); color: #000; }
+    #btn-connect:hover { filter: brightness(1.12); }
+    #btn-clear { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+    #btn-clear:hover { color: var(--text); border-color: var(--text); }
+
+    /* status badge */
+    #status {
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    #status[data-level="ok"]   { border-color: var(--green); color: var(--green); }
+    #status[data-level="warn"] { border-color: var(--amber); color: var(--amber); }
+    #status[data-level="err"]  { border-color: var(--red);   color: var(--red);   }
+    #status[data-level="busy"] { border-color: var(--blue);  color: var(--blue);  }
+
+    /* ---- log table ---- */
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .log-header span { font-size: 12px; color: var(--muted); }
+
+    .table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    table { width: 100%; border-collapse: collapse; }
+
+    thead th {
+      background: var(--surface);
+      padding: 6px 10px;
+      text-align: left;
+      font-weight: 500;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    tbody tr:hover { background: #1c2128; }
+    tbody td {
+      padding: 5px 10px;
+      border-bottom: 1px solid #21262d;
+      vertical-align: top;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+
+    td.msg {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    td.freq, td.snr { white-space: nowrap; color: var(--muted); }
+
+    .sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+  </style>
+</head>
+<body>
+  <h1>JS8Call Browser Decoder</h1>
+
+  <div class="controls">
+    <label>URL</label>
+    <input id="ws-url" type="url" value="ws://localhost:8073/audio" placeholder="ws://host:port/path"/>
+
+    <div class="sep"></div>
+
+    <label>Mode</label>
+    <select id="mode-select">
+      <option value="slow">Slow (30 s)</option>
+      <option value="normal" selected>Normal (15.6 s)</option>
+      <option value="fast">Fast (10 s)</option>
+      <option value="turbo">Turbo (6 s)</option>
+    </select>
+
+    <div class="sep"></div>
+
+    <label>Hz min</label>
+    <input id="freq-min" type="number" value="200"  min="0"   max="4000" step="50"/>
+    <label>max</label>
+    <input id="freq-max" type="number" value="3000" min="100" max="6000" step="50"/>
+
+    <div class="sep"></div>
+
+    <button id="btn-connect">Connect</button>
+    <span id="status" data-level="idle">Idle</span>
+  </div>
+
+  <div class="log-header">
+    <span>Decoded messages (newest first)</span>
+    <button id="btn-clear">Clear</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:72px">UTC</th>
+          <th style="width:72px">Freq</th>
+          <th style="width:56px">SNR</th>
+          <th>Message</th>
+        </tr>
+      </thead>
+      <tbody id="decode-log"></tbody>
+    </table>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

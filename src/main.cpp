@@ -83,7 +83,14 @@ void setup() {
 
     // --------------------------------------------------------
     // 1. APA102 status LED — red during boot
+    //
+    // Drive CLK low before FastLED init. GPIO45 (APA102_CLK) has a
+    // default pull-down from the schematic, but making it explicit
+    // prevents any glitch on the LED chain during power-on.
     // --------------------------------------------------------
+    pinMode(PIN_LED_CLK, OUTPUT);
+    digitalWrite(PIN_LED_CLK, LOW);
+
     FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLK, BGR>(leds, NUM_LEDS);
     FastLED.setBrightness(32);
     setLED(CRGB::Red);
@@ -151,7 +158,7 @@ void setup() {
     if (!audioCapture.begin()) {
         Serial.println("[WARN] Audio capture failed — streaming disabled");
     } else {
-        Serial.println("[init] Audio capture ready (IO17, 16kHz)");
+        Serial.println("[init] Audio capture ready (IO17, 12kHz)");
     }
 
     // --------------------------------------------------------

@@ -150,14 +150,14 @@
 // Using ADC continuous mode with DMA for low-overhead capture.
 #define AUDIO_ADC_CHANNEL    ADC_CHANNEL_6  // IO17 = ADC1_CH6
 #define AUDIO_ADC_UNIT       ADC_UNIT_1
-#define AUDIO_SAMPLE_RATE_HZ 16000   // ADC sample rate for streaming
+#define AUDIO_SAMPLE_RATE_HZ 12000   // ADC sample rate — 12kHz matches ft8_lib and JS8Call natively
 #define AUDIO_ADC_ATTEN      ADC_ATTEN_DB_12  // Full 0-3.3V range
 #define AUDIO_ADC_BITWIDTH   ADC_BITWIDTH_12  // 12-bit resolution
 #define AUDIO_DMA_BUF_COUNT  8
 #define AUDIO_DMA_BUF_LEN    512    // Samples per DMA buffer
 
 // I2S Speaker output sample rate (independent of ADC rate)
-#define SPEAKER_SAMPLE_RATE_HZ  16000  // Match ADC rate for passthrough
+#define SPEAKER_SAMPLE_RATE_HZ  12000  // Match ADC rate for passthrough
 
 // ============================================================
 // FFT / Waterfall

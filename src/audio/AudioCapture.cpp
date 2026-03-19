@@ -33,6 +33,8 @@ AudioCapture::AudioCapture()
     , _taskHandle(nullptr)
     , _dcX1(0.0f)
     , _dcY1(0.0f)
+    , _agcEnabled(true)
+    , _agcGain(1.0f)
     , _ringBuf(nullptr)
     , _writePos(0)
     , _readPos(0)
@@ -209,11 +211,12 @@ void AudioCapture::_captureLoop() {
         if (pcmCount == 0) continue;
 
         // ── Software SSB product detection ───────────────────────
-        // When LSB/USB/CW mode is active, the SI4732 is in AM mode.
-        // SoftSSBDemod multiplies each sample by the BFO carrier
-        // and low-pass filters to extract the SSB audio.
-        // This call is a no-op when softSSBDemod.isEnabled() == false.
         softSSBDemod.process(pcmBuf, pcmCount);
+
+        // ── Software AGC ─────────────────────────────────────────
+        // Applied after SSB demod so the gain tracks the demodulated
+        // signal level, not the raw AM envelope.
+        _applyAGC(pcmBuf, pcmCount);
 
 #if SPEAKER_SW_PASSTHROUGH
         // Route to speaker I2S
@@ -281,6 +284,44 @@ void AudioCapture::_writeSamplesToRing(const int16_t* samples, size_t count) {
         _writePos = (_writePos + 1) & (AUDIO_RING_CAPACITY - 1);
     }
     xSemaphoreGive(_ringMutex);
+}
+
+// ============================================================
+// _applyAGC()
+// Measures the RMS of the current frame, then adjusts _agcGain
+// toward (AGC_TARGET_RMS / rms) using separate attack/release
+// rates.  Gain is clamped to [AGC_MIN_GAIN, AGC_MAX_GAIN].
+// The adjusted gain is then applied in-place to the buffer.
+// Called with silence (rms < 10) the gain is held to prevent
+// runaway amplification between transmissions.
+// ============================================================
+void AudioCapture::_applyAGC(int16_t* buf, size_t count) {
+    if (!_agcEnabled || count == 0) return;
+
+    // Compute RMS
+    float sumSq = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        float s = (float)buf[i];
+        sumSq += s * s;
+    }
+    float rms = sqrtf(sumSq / (float)count);
+
+    // Only adjust gain when signal is present (not silence/noise floor)
+    if (rms > 10.0f) {
+        float desired = AGC_TARGET_RMS / rms;
+        float alpha   = (desired < _agcGain) ? AGC_ATTACK : AGC_RELEASE;
+        _agcGain += alpha * (desired - _agcGain);
+        if (_agcGain < AGC_MIN_GAIN) _agcGain = AGC_MIN_GAIN;
+        if (_agcGain > AGC_MAX_GAIN) _agcGain = AGC_MAX_GAIN;
+    }
+
+    // Apply gain in-place
+    for (size_t i = 0; i < count; i++) {
+        int32_t s = (int32_t)((float)buf[i] * _agcGain);
+        if (s >  32767) s =  32767;
+        if (s < -32768) s = -32768;
+        buf[i] = (int16_t)s;
+    }
 }
 
 AudioCapture audioCapture;

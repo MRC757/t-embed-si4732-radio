@@ -42,19 +42,24 @@ correctly in the AM passband. See `BandConfig.h` for the tuning notes.
 ### Web Interface
 - Live frequency display and tuning controls
 - Real-time **spectrum waterfall** (FFT, 10 fps, 256 bins)
-- **Audio streaming** — raw 16-bit PCM over WebSocket, Web Audio API playback
+- **Audio streaming** — 12 kHz 16-bit PCM over WebSocket, Web Audio API playback
 - **Browser-side BFO pitch trim** — instant pitch adjustment without
   a network round-trip, processed in the AudioWorklet
-- **FT8 / JS8Call decoder** — browser-side WASM decoder (ft8_lib), UTC
-  slot-aligned, no PC software needed; supports FT8 (15 s), JS8Call Fast
-  (6 s), Normal (10 s), and Slow (30 s) slot modes
+- **FT8 / FT4 decoder** — browser-side pure-TypeScript decoder (ft8ts), UTC
+  slot-aligned, no PC software or WASM compilation needed
+- **JS8Call decoder** — browser-side Rust WASM decoder; full LDPC + callsign
+  decode; supports all four speed modes (Slow 30 s, Normal 15.6 s, Fast 10 s,
+  Turbo 6 s) at 12 kHz; built from the included `js8call-decoder/` project
+- **Browser-side CW decoder** — Goertzel filter locked to BFO pitch, adaptive
+  envelope threshold, automatic WPM estimation (5–40 WPM), full ITU character
+  set; tracks BFO slider in real time
 - **NTP time sync** — ESP32 NTP client feeds accurate UTC to the browser;
   configurable server via web GUI; **Sync Now** button for manual alignment
   when internet NTP is unavailable
 - Band and mode selector with all 36 bands
 - **S-meter** — RSSI displayed as S1–S9 / S9+dB (S9 = 34 dBμV, 6 dB/unit)
 - SNR bar and RDS display for FM stations
-- Volume, AGC, and BFO trim controls
+- Volume, AGC, BFO trim, and CW decoder controls
 
 ### Power Management
 - **BQ25896** USB-C battery charger — initialised at boot so the 900 mAh
@@ -118,17 +123,14 @@ correctly in the AM passband. See `BandConfig.h` for the tuning notes.
 | ES7210 Mic | BCLK=IO47, LRCK=IO21, DIN=IO14, MCLK=IO48 |
 | APA102 LED | CLK=IO45, DATA=IO42 |
 | MicroSD | CS=IO39, SCLK=IO40, MOSI=IO41, MISO=IO38 |
-| SI4732 I2C | SDA=IO18*, SCL=IO08* |
+| SI4732 I2C | SDA=IO18, SCL=IO08 |
 | SI4732 Audio | Analog → IO17 (ADC1_CH6) |
 | SI4732 Power | IO46 (active HIGH) |
 | BQ25896 / BQ27220 | Same I2C bus as SI4732 |
 
-> **\* I2C SDA/SCL pins are pending hardware verification.** The product image
-> labels them SDA=IO18, SCL=IO08, but the sister board (T-Embed CC1101) uses
-> the opposite order in its working code. The boot-time I2C scanner
-> (`I2CScanner`) automatically tries both configurations and reports which
-> finds all four devices. Once confirmed, update `I2C_SDA` / `I2C_SCL` in
-> `PinConfig.h`.
+> I2C pin order confirmed from the official LILYGO schematic and pinmap photo
+> (SDA=IO18, SCL=IO08). The boot-time `I2CScanner` still runs and will report
+> if a hardware variant is encountered with the opposite order.
 
 #### Full I2C Bus
 
@@ -143,6 +145,61 @@ All four devices share one bus (400 kHz):
 
 ---
 
+## ES7210 Audio Path Upgrade (Planned)
+
+The ES7210 quad-channel I2S ADC is already on the board and connected to the
+ESP32-S3. Only two of its four mic input channels (MIC1, MIC2) are used by the
+onboard MEMS microphones. MIC3 and MIC4 inputs are routed to the ES7210 but
+left unconnected on the PCB, making MIC3 an ideal high-quality input for the
+SI4732 analog audio.
+
+Replacing the ESP32 ADC path (IO17, ~9-10 ENOB) with the ES7210 (24-bit I2S)
+would dramatically improve weak-signal FT8 and SSB reception.
+
+### Hardware modification
+
+| Point | Location | Notes |
+|-------|----------|-------|
+| **Source** | GPIO expansion header pin labeled **SCL** (bottom of board) | This is IO17 = SI4732 analog audio output, ~1.65 V DC + audio |
+| **Destination** | ES7210 **MIC3P** (IC pin 31) | Requires soldering directly to the ES7210 QFN pad |
+| **MIC3N** | ES7210 pin 32 | Tie to AGND (analog ground) |
+| **MICBIAS34** | ES7210 pin 26 | Already has bypass caps C29/C30 — no work needed |
+| **REFP34** | ES7210 pin 29 | Already has bypass cap — no work needed |
+
+**Required component:** one **100 nF** ceramic capacitor in series on the signal
+line for AC coupling (removes the 1.65 V DC offset from the SI4732 output
+before it enters the ES7210 differential input).
+
+```
+SI4732 audio out
+(Expansion header SCL / IO17)
+        |
+       [100nF]          ← AC coupling cap
+        |
+    ES7210 MIC3P (pin 31)
+    ES7210 MIC3N (pin 32) ── AGND
+```
+
+### Firmware changes required
+
+Once the hardware is wired, the firmware changes are:
+
+1. **`PinConfig.h`** — add `PIN_ES7210_MIC3_CHANNEL 2` (ES7210 channel index for
+   MIC3) and set `PIN_SI4732_AUDIO -1` to disable the ADC path.
+2. **`AudioCapture.cpp`** — replace the `adc_digi_*` capture loop with an I2S
+   read from `I2S_PORT_MIC` (already defined as `I2S_NUM_1`). The ES7210
+   driver (`ES7210.h` from lewisxhe) needs to be configured for single-channel
+   24-bit capture on channel 2 (MIC3).
+3. **`AudioCapture.h`** — remove `AUDIO_ADC_CHANNEL`, `AUDIO_ADC_UNIT`,
+   `AUDIO_ADC_ATTEN`, `AUDIO_ADC_BITWIDTH` constants. Add `ES7210_MIC_CHANNEL`.
+4. **Sample rate** — the ES7210 supports 8 / 12 / 16 / 44.1 / 48 kHz. At 12 kHz
+   it matches the stream rate and the ft8_lib decoder natively.
+
+> Until this modification is made, the firmware continues to use the ESP32-S3
+> ADC DMA path on IO17 with software calibration and AGC.
+
+---
+
 ## Audio Architecture
 
 The SI4732 on this board outputs **analog audio only** (no I2S pins exposed).
@@ -151,27 +208,35 @@ The SI4732 on this board outputs **analog audio only** (no I2S pins exposed).
 SI4732 analog audio (IO17)
        |
        v
-ESP32-S3 ADC1_CH6 — continuous DMA, 16 kHz, 12-bit
+ESP32-S3 ADC1_CH6 — continuous DMA, 12 kHz, 12-bit
        |
        v
 esp_adc_cal_raw_to_voltage()  [corrects ±50 LSB INL bow]
        |
        v
-IIR DC blocker  y[n] = x[n] - x[n-1] + 0.9999·y[n-1]  [removes DC]
+IIR DC blocker  y[n] = x[n] - x[n-1] + 0.9999·y[n-1]  [removes DC offset]
        |
        +-- SoftSSBDemod.process()   [in-place, when SSB/CW active]
        |     DDS BFO oscillator (sin LUT, 32-bit phase accumulator)
        |     4th-order Butterworth LPF (two cascaded biquads)
        |
-       +-- PSRAM ring buffer (4 seconds deep)
+       v
+_applyAGC()  [software AGC — RMS tracking, attack 0.3, release 0.02]
+       |
+       +-- PSRAM ring buffer (~5.5 s deep)
              |
              +-- WebSocket /ws/audio  --> browser Web Audio API
-             |     AudioWorklet with optional browser BFO pitch trim
+             |     AudioWorklet + optional browser BFO pitch trim
              |
              +-- FFTProcessor  --> waterfall bins --> /ws/radio
              |
-             +-- ft8Decoder    --> configurable slot buffers --> WASM decode
-                               (FT8 15s / JS8 6–30s)
+             +-- ft8Decoder    --> 15 s slot buffer --> ft8ts decode (FT8/FT4)
+             |
+             +-- js8Decoder    --> Slow/Normal/Fast/Turbo slot buffer
+             |                     --> js8call_wasm LDPC decode (callsigns)
+             |
+             +-- cwDecoder     --> Goertzel @ BFO Hz --> Morse lookup
+                                   automatic WPM, full ITU table
 ```
 
 ---
@@ -210,14 +275,21 @@ data/                          LittleFS web UI (pio run -t uploadfs)
     ├── app.js                 UI controller, S-meter, NTP status
     ├── audio.js               Web Audio API PCM player + browser BFO
     ├── waterfall.js           Canvas waterfall renderer (heat/ice/green)
-    └── ft8.js                 FT8/JS8Call decoder, NTP slot alignment
+    ├── ft8.js                 FT8/FT4 decoder, NTP slot alignment
+    ├── ft8worker.js           Module Web Worker — imports ft8ts.mjs, energy fallback
+    ├── ft8ts.mjs              ft8ts pure-TS FT8/FT4 decoder (download separately)
+    ├── js8call.js             JS8Call decoder controller
+    ├── js8call-worker.js      Module Web Worker — imports js8call_wasm.js
+    ├── js8call_wasm.js        wasm-bindgen JS glue (build from js8call-decoder/)
+    ├── js8call_wasm_bg.wasm   JS8Call WASM binary (build from js8call-decoder/)
+    └── cw.js                  CW decoder — Goertzel, auto-WPM, Morse table
 ```
 
 ### FreeRTOS Tasks
 
 | Task | Core | Priority | Purpose |
 |------|------|----------|---------|
-| AudioADC | 1 | 6 | ADC DMA → SoftSSBDemod → ring buffer |
+| AudioADC | 1 | 6 | ADC DMA → SoftSSBDemod → AGC → ring buffer |
 | RadioCtrl | 1 | 5 | SI4732 RSSI/RDS poll, I2C watchdog |
 | FFTDsp | 1 | 4 | FFT waterfall rows |
 | Encoder | 0 | 4 | Rotary encoder debounce |
@@ -228,8 +300,8 @@ data/                          LittleFS web UI (pio run -t uploadfs)
 
 **`ws://device/ws/audio`** — Binary, server→client, all fields little-endian
 ```
-[4 bytes uint32 timestamp ms][N × int16 PCM @ 16 kHz]
-Frame = 512 samples = 32 ms audio
+[4 bytes uint32 timestamp ms][N × int16 PCM @ 12 kHz]
+Frame = 512 samples = ~42.7 ms audio
 
 JS decode:
   const ts  = view.getUint32(0, true);
@@ -256,7 +328,7 @@ Text (server→client):  JSON status @ 2 Hz
     "rssi":45, "snr":22, "stereo":false, "volume":40,
     "bat":3.85, "batPct":72, "charging":false, "usbIn":false,
     "rdsName":"", "rdsProg":"", "agc":true, "agcGain":0,
-    "sampleRate":16000, "dropped":0, "ts":12345678,
+    "sampleRate":12000, "dropped":0, "ts":12345678,
     "ntpSynced":true, "utcMs":1700000000000,   // UTC ms (only when NTP synced)
     "bands":[...] }
 
@@ -344,15 +416,15 @@ pio run --target erase
 ```
 then re-flash firmware and filesystem.
 
-### 6. Verify I2C pins (first boot)
+### 6. Verify I2C devices (first boot)
 
-Read the serial monitor output. The I2C scanner will print one of:
-- **Config A (SDA=18 SCL=8): 4 device(s)** — update `PinConfig.h` with `I2C_SDA=18, I2C_SCL=8`
-- **Config B (SDA=8 SCL=18): 4 device(s)** — update `PinConfig.h` with `I2C_SDA=8, I2C_SCL=18`
-
-Once confirmed, update `I2C_SDA` and `I2C_SCL` in `src/config/PinConfig.h`
-and rebuild. The scanner remains in `main.cpp` and will still run at every
-boot, but its output is informational once the correct values are set.
+Read the serial monitor output. The I2C scanner will print the devices found
+on the bus. Expected output with correct pin order (SDA=IO18, SCL=IO08):
+```
+I2C scan: 4 device(s) found — 0x40 (ES7210), 0x55 (BQ27220), 0x63 (SI4732), 0x6B (BQ25896)
+```
+If fewer than 4 devices are found, check that the SI4732 module is seated in
+its JST connector and that `PWR_ON` (IO46) is driven HIGH at boot.
 
 ---
 
@@ -371,49 +443,33 @@ BFO wraps — producing seamless, jump-free audio tuning.
 
 ---
 
-## FT8 / JS8Call Decoding
+## FT8 / FT4 Decoding
 
-Decoding runs entirely in the **browser** — no PC software needed.
+Decoding runs entirely in the **browser** — no PC software or WASM compilation needed.
 
 ```
-SI4732 tuned to FT8/JS8Call dial frequency (USB mode)
-SI4732 in AM mode + SoftSSBDemod recovers the USB audio
+SI4732 tuned to FT8 dial frequency (USB mode)
+SoftSSBDemod recovers USB audio → streams over WebSocket
        |
        v
-Audio streams over WebSocket to browser
-       |
-       v
-ft8_lib WASM decoder in a Web Worker
-  - Clock reference: ESP32 NTP UTC epoch fed via status frames every 500 ms
-    browser computes correctedNow = espUtcMs + (Date.now() − receiveMs)
-  - Waits for next UTC slot boundary (FT8 15 s / JS8Call 6–30 s)
-  - Buffers a complete slot then decodes: callsigns, grid squares, reports
+ft8ts pure-TypeScript decoder in ft8worker.js (Module Web Worker)
+  - Clock reference: ESP32 NTP UTC epoch fed every 500 ms via status frames
+    correctedNow = espUtcMs + (Date.now() − receiveMs)
+  - Waits for next UTC 15 s slot boundary, buffers a complete slot, decodes
+  - Decodes FT8 and FT4 callsigns, grid squares, reports
        |
        v
 Decoded spots shown in scrollable log (newest first)
 ```
 
-**Slot modes** (selectable in the web UI *Slot:* dropdown):
+**Time synchronisation (FT8):**
 
-| Mode | Slot | Notes |
-|------|------|-------|
-| FT8 | 15 s | Standard — aligns to UTC 15 s grid |
-| JS8Call Fast | 6 s | Aligns to UTC 6 s grid |
-| JS8Call Normal | 10 s | Aligns to UTC 10 s grid |
-| JS8Call Slow | 30 s | Aligns to UTC 30 s grid |
+1. **NTP (automatic)** — ESP32 syncs to `pool.ntp.org` when STA is connected.
+   UTC timestamp injected into every status frame for browser slot alignment.
+2. **Custom NTP server** — set in the *NTP:* field; stored in NVS flash.
+3. **Sync Now (manual)** — press at the moment you hear the first FT8 tones.
 
-**Time synchronisation options** (best to worst):
-
-1. **NTP (automatic)** — ESP32 syncs to `pool.ntp.org` (or custom server) when
-   STA Wi-Fi is connected. UTC timestamp is injected into every status frame and
-   used by the browser decoder for slot alignment.
-2. **Custom NTP server** — enter an IP or hostname in the *NTP:* field and press
-   **Set**. Stored in NVS flash, survives reboots.
-3. **Sync Now (manual)** — when NTP is unavailable, press **Sync Now** at the
-   exact moment you hear the first FT8 tones. The decoder snaps its slot
-   boundary to that instant.
-
-**Pre-configured FT8 frequencies (USB dial):**
+**Pre-configured FT8 dial frequencies (USB):**
 
 | Band | Frequency |
 |------|-----------|
@@ -425,10 +481,78 @@ Decoded spots shown in scrollable log (newest first)
 | 15m | 21.074 MHz |
 | 10m | 28.074 MHz |
 
-**Note on ft8_lib WASM:** Place `ft8_lib.js` and `ft8_lib.wasm` in
-`data/js/` and upload with `pio run -t uploadfs`. Without these files the
-decoder falls back to audio energy analysis, which shows signal presence
-but cannot decode callsigns.
+**Setting up ft8ts (required for FT8/FT4 callsign decoding):**
+
+```bash
+npm pack @e04/ft8ts              # downloads ft8ts-x.x.x.tgz
+tar xzf ft8ts-*.tgz package/dist/ft8ts.mjs
+cp package/dist/ft8ts.mjs data/js/
+pio run -t uploadfs
+```
+
+Without `ft8ts.mjs` the worker falls back to audio energy analysis (signal
+presence only). ft8ts is GPL-3.0 licensed.
+
+---
+
+## JS8Call Decoding
+
+JS8Call decoding uses a **Rust WASM library** (`js8call-decoder/wasm/`) built
+with wasm-pack. It implements the complete JS8Call receive chain:
+
+- **Spectrogram** — FFT-based power spectrogram at 12 kHz
+- **Costas sync search** — correlation over the full (time, freq) grid
+- **LLR extraction** — soft log-likelihood ratios for LDPC input
+- **LDPC(174,91) decoder** — belief propagation, same code as FT8
+- **Message decode** — CRC-11, callsign pairs, grid squares, free text
+
+```
+SI4732 tuned to JS8Call dial frequency (USB mode, same audio stream)
+       |
+       v
+js8call-worker.js (Module Web Worker)
+  - Accumulates samples for one slot duration (see modes below)
+  - Calls Js8Decoder.push_samples() + run_decode()
+  - take_results() returns { freq_hz, snr_db, message } per decode
+       |
+       v
+Decoded messages shown in JS8Call log (newest first)
+```
+
+**Speed modes** (selectable in the web UI):
+
+| Mode | Slot | Symbol | FFT size | Tone spacing |
+|------|------|--------|----------|--------------|
+| Normal | 15.6 s | 160 ms | 1920-pt | 6.25 Hz |
+| Fast | 10 s | 80 ms | 960-pt | 12.5 Hz |
+| Turbo | 6 s | 40 ms | 480-pt | 25.0 Hz |
+| Slow | 30 s | 320 ms | 3840-pt | 3.125 Hz |
+
+> **Timing note:** The JS8Call WASM decoder does not yet use NTP-aligned slot
+> boundaries — it counts samples from when you press Start. For best results,
+> press **Start JS8Call** at the beginning of a transmission slot. NTP
+> alignment will be added in a future update.
+
+**Building the JS8Call WASM** (one-time, requires Rust + Node.js):
+
+```bash
+# Install Rust: https://rustup.rs
+# Install wasm-pack: cargo install wasm-pack
+
+cd js8call-decoder
+npm install
+npm run wasm:build            # → wasm/pkg/js8call_wasm.js + .wasm
+
+# Copy the two output files to LittleFS
+cp wasm/pkg/js8call_wasm.js     ../data/js/
+cp wasm/pkg/js8call_wasm_bg.wasm ../data/js/
+
+cd ..
+pio run -t uploadfs
+```
+
+Without the WASM files, the JS8Call decoder falls back to RMS energy
+reporting (signal presence only). The status line shows which mode is active.
 
 ---
 
@@ -455,8 +579,10 @@ All installed automatically by PlatformIO from `platformio.ini`:
 > original `me-no-dev` library, required for ESP-IDF 4.4.x / Arduino-ESP32 2.x
 > compatibility.
 
-**Browser-side (no install — loaded from LittleFS):**
-- [ft8_lib](https://github.com/kgoba/ft8_lib) compiled to WASM
+**Browser-side (loaded from LittleFS — obtain separately):**
+- [`@e04/ft8ts`](https://github.com/e04/ft8ts) — pure TypeScript FT8/FT4 decoder
+  (`npm pack @e04/ft8ts`, extract `dist/ft8ts.mjs` to `data/js/`, run `uploadfs`).
+  GPL-3.0. No WASM compilation required.
 
 ---
 
@@ -464,13 +590,13 @@ All installed automatically by PlatformIO from `platformio.ini`:
 
 | Module | File(s) | Status |
 |--------|---------|--------|
-| Pin configuration | `PinConfig.h` | ✅ Complete — pending I2C pin order HW verification |
+| Pin configuration | `PinConfig.h` | ✅ Complete — all pins verified against schematic and pinmap |
 | I2C auto-detection | `I2CScanner.h` | ✅ Complete — runs at every boot |
 | Power management | `PowerManager.h/.cpp` | ✅ Complete — BQ25896 + BQ27220 + LiPo curve |
 | Band configuration | `BandConfig.h` | ✅ Complete — 36 bands, FT8 table |
 | Radio control | `RadioController.h/.cpp` | ✅ Complete — AM/FM/SW/LW/SSB/CW |
 | Software SSB | `SoftSSBDemod.h/.cpp` | ✅ Complete — DDS BFO + biquad LPF |
-| Audio capture | `AudioCapture.h/.cpp` | ✅ Complete — ADC DMA, ADC cal, IIR DC-blocker |
+| Audio capture | `AudioCapture.h/.cpp` | ✅ Complete — ADC DMA, ADC cal, IIR DC-blocker, software AGC |
 | FFT waterfall | `FFTProcessor.h/.cpp` | ✅ Complete — PSRAM buffers |
 | WebSocket server | `WebSocketHandler.h/.cpp` | ✅ Complete — idle throttle |
 | REST API / NTP | `WebServer.cpp` | ✅ Complete — NTP, modem sleep, deferred reboot |
@@ -480,15 +606,18 @@ All installed automatically by PlatformIO from `platformio.ini`:
 | Web UI HTML/CSS | `index.html`, `style.css` | ✅ Complete |
 | Audio player | `audio.js` | ✅ Complete — AudioWorklet + browser BFO |
 | Waterfall renderer | `waterfall.js` | ✅ Complete — 3 palettes |
-| FT8/JS8Call decoder | `ft8.js` | ✅ Complete — NTP UTC alignment, 4 slot modes |
-| UI controller | `app.js` | ✅ Complete — S-meter, NTP status, slot mode |
+| FT8/FT4 decoder | `ft8.js` | ✅ Complete — NTP UTC alignment, 15 s slot |
+| FT8 decode worker | `ft8worker.js` | ✅ Complete — module worker, ft8ts + energy fallback |
+| ft8ts decoder | `ft8ts.mjs` | ⬇ Download separately from `@e04/ft8ts` npm package |
+| JS8Call controller | `js8call.js` | ✅ Complete — 4 speed modes, WASM + energy fallback |
+| JS8Call worker | `js8call-worker.js` | ✅ Complete — module worker, LDPC decode |
+| JS8Call WASM | `js8call_wasm.js` + `.wasm` | ⬇ Build from `js8call-decoder/` with wasm-pack |
+| CW decoder | `cw.js` | ✅ Complete — Goertzel, adaptive threshold, auto-WPM, ITU table |
+| UI controller | `app.js` | ✅ Complete — S-meter, NTP status, JS8Call/CW routing |
 
 ---
 
 ## Known Limitations
-
-**I2C SDA/SCL pin order unverified.** The `I2CScanner` resolves this at
-runtime. Update `PinConfig.h` after first boot.
 
 **SI4732 analog audio level unverified.** The ADC input expects 0–3.3V; the
 SI4732 audio output is a line-level signal centred at VCC/2. If the received
@@ -501,13 +630,35 @@ patch for very weak signals, because the AM filter preceding the product
 detector passes some adjacent interference that hardware SSB would reject.
 The SI4732's 3 kHz AM bandwidth filter is the best available without the patch.
 
-**Waterfall shows audio spectrum, not RF.** The waterfall displays 0–8 kHz
-audio content within the tuned filter bandwidth — not a panoramic RF spectrum
-view. For FT8 this is exactly what the decoder needs.
+**ESP32-S3 ADC effective resolution limits weak-signal FT8.** The theoretical
+12-bit ADC gives 72 dB SINAD, but the ESP32-S3 achieves roughly 9–10 ENOB
+(~54–60 dB effective) in practice. ADC calibration (`esp_adc_cal`) corrects
+the INL bow but not wideband noise. Strong FT8 signals decode reliably;
+signals below approximately −10 dB SNR may be missed compared to a dedicated
+sound card. WSPR (requires −28 dB SNR) is not practical with this path.
 
-**ft8_lib WASM not included.** Must be compiled from
-[kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) and placed in `data/js/`.
-Without it, the decoder shows signal energy only.
+**Waterfall shows audio spectrum, not RF.** The waterfall displays 0–6 kHz
+audio content within the tuned filter bandwidth — not a panoramic RF spectrum
+view. For FT8 and CW this is exactly what the decoders need.
+
+**ft8ts.mjs not included.** Must be obtained from the
+[`@e04/ft8ts`](https://github.com/e04/ft8ts) npm package and placed in
+`data/js/` before running `pio run -t uploadfs`. Without it, the FT8/FT4
+decoder falls back to RMS energy reporting (signal presence only, no
+callsigns).
+
+**JS8Call WASM not pre-built.** Must be compiled from the included
+`js8call-decoder/` project using Rust + wasm-pack (see *JS8Call Decoding*
+section). Without `js8call_wasm.js` / `js8call_wasm_bg.wasm` in `data/js/`,
+the JS8Call decoder falls back to RMS energy reporting. JS8Call message
+decoding handles standard callsign pairs, grid squares, and free text; some
+JS8Call-specific directed and relay message types may decode as `<bits:hex>`
+until full message-type coverage is added.
+
+**JS8Call slot boundaries not NTP-aligned.** The JS8Call decoder counts
+samples from when Start is pressed rather than locking to the UTC slot grid.
+Press Start at the beginning of a transmission for best decode rate. FT8 is
+unaffected — it uses full NTP alignment.
 
 ---
 
@@ -521,7 +672,8 @@ Without it, the decoder shows signal energy only.
 - [mathieucarbou/ESPAsyncWebServer](https://github.com/mathieucarbou/ESPAsyncWebServer)
 - [goshante/ats20_ats_ex](https://github.com/goshante/ats20_ats_ex) — SSB reference
 - [esp32-si4732 org](https://github.com/esp32-si4732) — ATS-Mini community firmware
-- [kgoba/ft8_lib](https://github.com/kgoba/ft8_lib) — FT8 decoder
+- [e04/ft8ts](https://github.com/e04/ft8ts) — pure TypeScript FT8/FT4 decoder (GPL-3.0)
+- `js8call-decoder/` (included) — custom Rust WASM JS8Call decoder (LDPC + callsign decode)
 - [SI4735 Programming Guide AN332](https://www.silabs.com/documents/public/application-notes/AN332.pdf)
 
 ---

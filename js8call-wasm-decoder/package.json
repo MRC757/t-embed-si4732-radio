@@ -1,0 +1,12 @@
+{
+  "name": "js8call-wasm-decoder",
+  "version": "0.1.0",
+  "description": "JS8Call browser decoder — Rust/WASM LDPC + callsign decode at 12 kHz",
+  "license": "GPL-3.0",
+  "scripts": {
+    "generate":   "python tools/gen_ldpc_matrix.py",
+    "build:wasm": "cd wasm && wasm-pack build --target web --out-dir ../wasm/pkg",
+    "copy:dist":  "node -e \"const fs=require('fs');['js8call_wasm.js','js8call_wasm_bg.wasm'].forEach(f=>{fs.copyFileSync('wasm/pkg/'+f,'dist/'+f);console.log('copied',f)})\"",
+    "build":      "npm run generate && npm run build:wasm && npm run copy:dist"
+  }
+}

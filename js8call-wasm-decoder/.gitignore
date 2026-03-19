@@ -1,0 +1,17 @@
+# Rust build artifacts
+wasm/target/
+wasm/pkg/
+
+# Generated — recreate with: python tools/gen_ldpc_matrix.py
+wasm/src/ldpc_matrix.rs
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

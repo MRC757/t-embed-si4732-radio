@@ -8,7 +8,7 @@
 //
 // CAPTURE METHOD: ESP32-S3 ADC Continuous Mode (DMA-backed)
 //   - esp_adc/adc_continuous.h driver
-//   - 12-bit samples at 16kHz
+//   - 12-bit samples at 12 kHz (matches ft8_lib and JS8Call natively)
 //   - DMA delivers frames of AUDIO_DMA_BUF_LEN samples per callback
 //   - Samples are DC-offset corrected (ADC midpoint ~2048 raw counts)
 //     and converted to signed int16 for compatibility with:
@@ -16,23 +16,29 @@
 //       • FFTProcessor (spectrum / waterfall)
 //       • Speaker I2S passthrough (hear the radio locally)
 //
+// SIGNAL PROCESSING CHAIN (per DMA frame):
+//   1. esp_adc_cal_raw_to_voltage()  — linearise ADC INL bow
+//   2. IIR DC blocker               — remove SI4732 output DC offset
+//   3. SoftSSBDemod.process()       — product detector (SSB/CW modes only)
+//   4. _applyAGC()                  — software AGC, keeps RMS near target
+//   5. ring buffer / WebSocket / FFT / CW decoder
+//
+// SOFTWARE AGC:
+//   Enabled by default. Per-frame RMS tracking with separate attack
+//   (~3 frames) and release (~50 frames) rates. Gain held in silence.
+//   Disable with enableAGC(false) if external AGC is preferred.
+//
 // SPEAKER PASSTHROUGH:
-//   Captured ADC samples are scaled and written to the speaker
-//   I2S bus (IO07/IO05/IO06) for local audio output.
-//   The SI4732 analog audio also drives the speaker amplifier
-//   directly (hardware path), so software passthrough adds an
-//   echo unless the hardware amp is muted via a GPIO.
-//   For web streaming the hardware amp path is fine;
-//   the software path is only needed if you want to mute/unmute
-//   from firmware. Set SPEAKER_SW_PASSTHROUGH 0 to disable.
+//   Set SPEAKER_SW_PASSTHROUGH 1 to route ADC samples to the speaker
+//   I2S bus. The hardware amp path runs in parallel, so this adds echo
+//   unless the amp is muted. Disabled by default (0).
 //
 // AUDIO QUALITY NOTE:
-//   12-bit ADC at 16kHz is fully adequate for:
+//   12-bit ADC at 12 kHz (6 kHz Nyquist) is adequate for:
 //     - SSB voice (300–3000 Hz passband)
-//     - FT8 (audio bandwidth ~2.4 kHz)
-//     - WSPR, JS8, other digital modes
-//     - AM/FM audio (FM via SI4732 has ~15kHz audio BW but
-//       16kHz sample rate limits to 8kHz — fine for monitoring)
+//     - FT8 / JS8Call (audio bandwidth ~2.4 kHz)
+//     - CW (700 Hz BFO tone, decoded by browser cw.js)
+//     - AM/FM audio monitoring (FM bandwidth limited to 6 kHz)
 // ============================================================
 #include <Arduino.h>
 #include "driver/adc.h"          // ESP-IDF 4.4.x ADC continuous (adc_digi_*)
@@ -42,7 +48,7 @@
 #define SPEAKER_SW_PASSTHROUGH  0   // 1 = route ADC samples to speaker I2S
                                     // 0 = hardware amp path only (recommended)
 
-// Ring buffer: 4 seconds at 16kHz = 64k samples
+// Ring buffer: ~5.5 seconds at 12 kHz = 65536 samples
 static constexpr size_t AUDIO_RING_CAPACITY = 65536; // power of 2
 
 // ADC calibration: reference voltage in mV for esp_adc_cal_characterize().
@@ -77,6 +83,14 @@ public:
     // Set software gain applied to ADC samples (1.0 = unity, 2.0 = +6dB)
     void setGain(float gain) { _gain = gain; }
 
+    // Software AGC — enabled by default. Tracks signal level frame-by-frame
+    // and adjusts a floating gain to keep RMS near AGC_TARGET_RMS.
+    // Attack is fast (~3 frames) to prevent clipping; release is slow (~50
+    // frames) so gain recovers gradually between transmissions.
+    void enableAGC(bool enable) { _agcEnabled = enable; }
+    bool agcEnabled() const     { return _agcEnabled; }
+    float agcGain()   const     { return _agcGain; }
+
     bool     isRunning()      const { return _running; }
     uint32_t droppedSamples() const { return _droppedSamples; }
 
@@ -95,9 +109,23 @@ private:
 
     // IIR single-pole DC-blocking high-pass filter state
     // Transfer function: y[n] = x[n] - x[n-1] + 0.9999 * y[n-1]
-    // Cutoff ≈ 0.16 Hz at 16 kHz — removes DC and 50/60 Hz hum below 1 Hz.
+    // Cutoff ≈ 0.13 Hz at 12 kHz — removes DC offset from SI4732 output.
     float _dcX1;
     float _dcY1;
+
+    // Software AGC state
+    bool  _agcEnabled;
+    float _agcGain;    // current AGC multiplier, applied per-frame after SSB demod
+    // Target RMS in int16 units (~-21 dBFS, headroom for SSB peaks)
+    static constexpr float AGC_TARGET_RMS = 3000.0f;
+    // Attack: fast — converges in ~3 frames to suppress sudden strong signals
+    static constexpr float AGC_ATTACK     = 0.3f;
+    // Release: slow — recovers over ~50 frames between transmissions
+    static constexpr float AGC_RELEASE    = 0.02f;
+    static constexpr float AGC_MIN_GAIN   = 0.25f;  // -12 dB floor
+    static constexpr float AGC_MAX_GAIN   = 32.0f;  // +30 dB ceiling
+
+    void _applyAGC(int16_t* buf, size_t count);
 
     // Ring buffer (allocated in PSRAM)
     int16_t*          _ringBuf;

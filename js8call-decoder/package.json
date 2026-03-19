@@ -1,0 +1,22 @@
+{
+  "name": "js8call-browser-decoder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm:build":  "cd wasm && wasm-pack build --target web --out-dir ../wasm/pkg",
+    "dev":         "npm run wasm:build && vite",
+    "build":       "npm run wasm:build && vite build",
+    "preview":     "vite preview",
+    "test:wasm":   "cd wasm && cargo test",
+    "check":       "tsc --noEmit",
+    "mock-sdr":    "node tools/mock-sdr-server.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.4",
+    "vite":       "^5.2"
+  },
+  "dependencies": {
+    "js8call-wasm": "file:./wasm/pkg"
+  }
+}
