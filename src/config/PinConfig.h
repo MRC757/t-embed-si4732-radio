@@ -39,11 +39,17 @@
 #define PIN_ENC_B        1  // Encoder channel B
 #define PIN_ENC_BTN      0  // Encoder push button (BOOT pin)
 
-// --- I2S Speaker Output ---
-// Drives the onboard speaker amplifier via I2S.
+// --- I2S Speaker Output (MAX98357A amplifier) ---
+// Drives the onboard MAX98357A I2S class-D amplifier.
+// SD_MODE is connected to IO17 (same pin as SI4732 LOUT and ADC audio input).
+// The SI4732 LOUT DC bias (~1.65V at rest) passively holds SD_MODE above the
+// 1.4V enable threshold — the amp is always on when SI4732 is powered.
+// DO NOT drive IO17 as a GPIO output: it conflicts with the ADC input and
+// would back-drive the SI4732 LOUT pin. No firmware SD_MODE control needed.
 #define PIN_I2S_SPK_BCLK  7   // I2S Bit Clock
 #define PIN_I2S_SPK_WCLK  5   // I2S Word/LR Clock
-#define PIN_I2S_SPK_DOUT  6   // I2S Data Out → amplifier
+#define PIN_I2S_SPK_DOUT  6   // I2S Data Out → MAX98357A DIN
+// PIN_AMP_MODE: SD_MODE = IO17 (passive, controlled by SI4732 LOUT bias — not a GPIO output)
 
 // --- ES7210 Microphone ADC (I2S input from MEMS mic) ---
 // ES7210 is a quad-channel I2S microphone ADC.
@@ -61,23 +67,29 @@
 // I2C is the ONLY control interface. Audio output is ANALOG.
 #define PIN_SI4732_SDA    18  // I2C SDA — internal bus
 #define PIN_SI4732_SCL     8  // I2C SCL — internal bus (IO08, NOT IO17)
-#define PIN_SI4732_RST    -1  // RST not separately wired; use -1 (SW reset)
+#define PIN_SI4732_RST    16  // RST → GPIO16 on the Speaker Slot JST connector
 #define PIN_SI4732_PWR    46  // Module power enable — active HIGH (Power_On)
 
-// SI4732 I2C address: SEN=VCC on T-Embed module → 0x63
+// SI4732 I2C address: SEN=VCC on T-Embed module → 0x63 (confirmed)
 // If you get "device not found", try 0x11 (SEN=GND variant)
 #define SI4732_I2C_ADDR_SEN_HIGH  0x63  // SEN tied to VCC (T-Embed default)
 #define SI4732_I2C_ADDR_SEN_LOW   0x11  // SEN tied to GND (alternate)
 #define SI4732_I2C_ADDR  SI4732_I2C_ADDR_SEN_HIGH
 
-// --- SI4732 Analog Audio Output ---
-// CRITICAL: The SI4732 uses ANALOG audio output on this board.
-// There are no I2S digital audio pins in the T-Embed SI4732 pinmap.
-// Audio is captured via ESP32-S3 ADC continuous DMA on this pin.
+// --- SI4732 Analog Audio / Speaker Mute ---
+// IO17 serves dual duty on the T-Embed SI4732:
+//   1. SI4732 LOUT analog audio signal (readable via ADC1_CH6 for web stream)
+//   2. Analog speaker amp MUTE pin (GPIO output: LOW=playing, HIGH=muted)
 //
-// IO17 also appears as "SCL" on the GPIO expansion header —
-// do NOT use the expansion header I2C if audio capture is active.
-#define PIN_SI4732_AUDIO  17   // SI4732 analog audio → ESP32 ADC1_CH6
+// These two uses are mutually exclusive — IO17 cannot be simultaneously
+// an ADC input and a GPIO output.  Choose one at a time:
+//   Speaker path:   pinMode(17, OUTPUT); digitalWrite(17, LOW);
+//   Web stream:     configure ADC1_CH6 on IO17 (AudioCapture)
+//
+// Confirmed by physical inspection of the expansion port and by the
+// diy-ovilus-firmware reference (PIN_AUDIO_MUTE=17, LOW=unmuted).
+#define PIN_SI4732_AUDIO  17   // SI4732 LOUT → ADC1_CH6 (web stream, mutually exclusive with mute)
+#define PIN_AUDIO_MUTE    17   // Analog amp MUTE: LOW=playing, HIGH=muted
 
 // If the LilyGO schematic (not yet confirmed) shows SI4732 digital
 // audio pins are actually wired, define them here and set
@@ -91,7 +103,7 @@
 // I2C Bus Configuration
 // ============================================================
 //
-// ⚠  PIN ORDER UNVERIFIED — REQUIRES HARDWARE CONFIRMATION
+// ✓  PIN ORDER CONFIRMED — from T-Embed-SI4732.jpeg pinmap and PU2CLR library example
 //
 // Two conflicting sources exist for SDA/SCL assignment:
 //
@@ -106,9 +118,8 @@
 // Expected devices:  0x40 (ES7210), 0x55 (BQ27220),
 //                    0x63 (SI4732),  0x6B (BQ25896)
 //
-// UPDATE THESE TWO DEFINES once pins are confirmed on hardware:
-#define I2C_SDA   18   // ← VERIFY: may need to swap with I2C_SCL
-#define I2C_SCL    8   // ← VERIFY: may need to swap with I2C_SDA
+#define I2C_SDA   18   // Confirmed: matches T-Embed-SI4732.jpeg pinmap
+#define I2C_SCL    8   // Confirmed: matches T-Embed-SI4732.jpeg pinmap
 #define I2C_FREQ  400000  // 400 kHz Fast Mode
 
 // All four I2C devices share the same bus:
@@ -156,8 +167,11 @@
 #define AUDIO_DMA_BUF_COUNT  8
 #define AUDIO_DMA_BUF_LEN    512    // Samples per DMA buffer
 
-// I2S Speaker output sample rate (independent of ADC rate)
-#define SPEAKER_SAMPLE_RATE_HZ  12000  // Match ADC rate for passthrough
+// I2S Speaker output sample rate.
+// 16 kHz is confirmed to produce audible output on the MAX98357A amp.
+// 12 kHz caused the speaker to produce no sound (clock dividers issue).
+// ADC (12 kHz) → I2S (16 kHz) requires 4:3 upsampling in AudioCapture.cpp.
+#define SPEAKER_SAMPLE_RATE_HZ  16000
 
 // ============================================================
 // FFT / Waterfall
@@ -171,8 +185,8 @@
 // Only one I2S port needed: speaker output.
 // ADC continuous mode is separate from I2S.
 // ============================================================
-#define I2S_PORT_SPEAKER   I2S_NUM_0
-#define I2S_PORT_MIC       I2S_NUM_1  // ES7210 microphone (if used)
+#define I2S_PORT_SPEAKER   I2S_NUM_1  // Confirmed: factory spk_init() uses I2S_NUM_1
+#define I2S_PORT_MIC       I2S_NUM_0  // Confirmed: factory mic_init() uses I2S_NUM_0 (ES7210)
 
 // ============================================================
 // FreeRTOS Task Priorities and Stack Sizes
@@ -187,7 +201,7 @@
 #define STACK_RADIO      4096
 #define STACK_AUDIO      8192
 #define STACK_DSP        8192
-#define STACK_WEBSTREAM  4096
+#define STACK_WEBSTREAM  8192   // Increased: WaterfallRow (1028 B) on stack + FreeRTOS overhead
 #define STACK_DISPLAY    4096
 #define STACK_INPUT      2048
 

@@ -57,9 +57,9 @@ void WebSocketHandler::onAudioWsEvent(AsyncWebSocket* ws, AsyncWebSocketClient* 
     if (type == WS_EVT_CONNECT) {
         ESP_LOGI(TAG, "Audio client #%u connected from %s",
                  client->id(), client->remoteIP().toString().c_str());
-        // Send initial status on connect
+        // Send initial status on connect (include band table once)
         JsonDocument doc;
-        _buildStatusJson(doc);
+        _buildStatusJson(doc, true);
         String msg;
         serializeJson(doc, msg);
         client->text(msg);
@@ -75,12 +75,14 @@ void WebSocketHandler::onRadioWsEvent(AsyncWebSocket* ws, AsyncWebSocketClient* 
                                        AwsEventType type, void* arg, uint8_t* data, size_t len) {
     if (type == WS_EVT_CONNECT) {
         ESP_LOGI(TAG, "Radio client #%u connected", client->id());
-        // Send full status immediately on connect
+        // Send full status immediately on connect (include band table once)
         JsonDocument doc;
-        _buildStatusJson(doc);
+        _buildStatusJson(doc, true);
         String msg;
         serializeJson(doc, msg);
         client->text(msg);
+        // Send memory channel list on connect
+        _broadcastMemList();
     } else if (type == WS_EVT_DISCONNECT) {
         ESP_LOGI(TAG, "Radio client #%u disconnected", client->id());
     } else if (type == WS_EVT_DATA) {
@@ -153,8 +155,48 @@ void WebSocketHandler::_handleRadioCommand(const String& json) {
     } else if (strcmp(cmd, "step_down") == 0) {
         radioController.stepDown();
 
+    } else if (strcmp(cmd, "mem_save") == 0) {
+        int slot = doc["slot"] | 0;
+        const char* label = doc["name"] | "";
+        radioController.saveMemory(slot, label);
+        _broadcastMemList();
+
+    } else if (strcmp(cmd, "mem_load") == 0) {
+        int slot = doc["slot"] | 0;
+        radioController.loadMemory(slot);
+
+    } else if (strcmp(cmd, "mem_list") == 0) {
+        _broadcastMemList();
+
     } else {
         ESP_LOGW(TAG, "Unknown command: %s", cmd);
+    }
+}
+
+// ============================================================
+// _broadcastMemList() — send all saved memory slots to radio clients
+// ============================================================
+void WebSocketHandler::_broadcastMemList() {
+    if (!_wsRadio) return;
+    JsonDocument doc;
+    doc["type"] = "mem_list";
+    JsonArray arr = doc["slots"].to<JsonArray>();
+    for (int i = 0; i < RadioController::MEM_SLOTS; i++) {
+        MemorySlot ms;
+        if (!radioController.getMemorySlot(i, ms)) continue;
+        JsonObject m = arr.add<JsonObject>();
+        m["slot"] = ms.slot;
+        m["freq"] = ms.freqKHz;
+        m["mode"] = demodModeStr(ms.mode);
+        m["band"] = ms.bandIndex;
+        m["name"] = ms.name;
+    }
+    String msg;
+    serializeJson(doc, msg);
+    for (auto& client : _wsRadio->getClients()) {
+        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            client.text(msg);
+        }
     }
 }
 
@@ -162,7 +204,7 @@ void WebSocketHandler::_handleRadioCommand(const String& json) {
 // broadcastAudioFrame() — send 512 PCM samples to all audio clients
 // ============================================================
 void WebSocketHandler::broadcastAudioFrame() {
-    if (audioClientCount() == 0) return;
+    if (!_wsAudio || audioClientCount() == 0) return;
 
     static int16_t pcmBuf[AUDIO_FRAME_SAMPLES];
     size_t got = audioCapture.read(pcmBuf, AUDIO_FRAME_SAMPLES, pdMS_TO_TICKS(5));
@@ -175,17 +217,27 @@ void WebSocketHandler::broadcastAudioFrame() {
     uint32_t ts = millis();
     memcpy(frameBuf,     &ts,    4);
     memcpy(frameBuf + 4, pcmBuf, got * sizeof(int16_t));
+    const size_t frameLen = 4 + got * sizeof(int16_t);
 
-    _wsAudio->binaryAll(frameBuf, 4 + got * sizeof(int16_t));
+    // Send per-client, skipping any whose queue is full.
+    // binaryAll() does not check queue depth — a slow client fills its queue,
+    // async_tcp force-closes it, and the teardown can stall CPU 0 long enough
+    // to trigger the task watchdog.
+    for (auto& client : _wsAudio->getClients()) {
+        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            client.binary(frameBuf, frameLen);
+        }
+    }
 }
 
 // ============================================================
 // broadcastWaterfallRow() — send FFT magnitudes to radio clients
 // ============================================================
 void WebSocketHandler::broadcastWaterfallRow() {
-    if (radioClientCount() == 0) return;
+    if (!_wsRadio || radioClientCount() == 0) return;
 
-    WaterfallRow row;
+    // Static: WaterfallRow is 1028 bytes — too large for the stream task's stack.
+    static WaterfallRow row;
     if (!fftProcessor.getWaterfallRow(row)) return;
 
     // Binary frame (all fields little-endian — ESP32-S3 native byte order):
@@ -198,14 +250,18 @@ void WebSocketHandler::broadcastWaterfallRow() {
     memcpy(wfBuf + 4, &ts,       4);
     memcpy(wfBuf + 8, row.bins,  WATERFALL_COLS * sizeof(float));
 
-    _wsRadio->binaryAll(wfBuf, sizeof(wfBuf));
+    for (auto& client : _wsRadio->getClients()) {
+        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            client.binary(wfBuf, sizeof(wfBuf));
+        }
+    }
 }
 
 // ============================================================
 // broadcastStatus() — send JSON radio status to all radio clients
 // ============================================================
 void WebSocketHandler::broadcastStatus() {
-    if (radioClientCount() == 0) return;
+    if (!_wsRadio || radioClientCount() == 0) return;
     uint32_t now = millis();
     if (now - _lastStatusBroadcastMs < STATUS_BROADCAST_MS) return;
     _lastStatusBroadcastMs = now;
@@ -214,13 +270,18 @@ void WebSocketHandler::broadcastStatus() {
     _buildStatusJson(doc);
     String msg;
     serializeJson(doc, msg);
-    _wsRadio->textAll(msg);
+
+    for (auto& client : _wsRadio->getClients()) {
+        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            client.text(msg);
+        }
+    }
 }
 
 // ============================================================
 // _buildStatusJson()
 // ============================================================
-void WebSocketHandler::_buildStatusJson(JsonDocument& doc) {
+void WebSocketHandler::_buildStatusJson(JsonDocument& doc, bool includeBands) {
     radioController.lockStatus();
     const RadioStatus& s = radioController.getStatus();
 
@@ -238,6 +299,7 @@ void WebSocketHandler::_buildStatusJson(JsonDocument& doc) {
     doc["volume"]      = s.volume;
     doc["agc"]         = s.agcEnabled;
     doc["agcGain"]     = s.agcGain;
+    doc["rssiPeak"]    = s.rssiPeak;
     doc["rdsName"]     = s.rdsStationName;
     doc["rdsProg"]     = s.rdsProgramInfo;
     doc["ssb"]         = true; // Software SSB always available
@@ -261,15 +323,18 @@ void WebSocketHandler::_buildStatusJson(JsonDocument& doc) {
         doc["utcMs"] = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
 
-    // Add band table on first connect (type="status" → browser checks for bandTable)
-    JsonArray bands = doc["bands"].to<JsonArray>();
-    for (int i = 0; i < BAND_COUNT; i++) {
-        JsonObject b = bands.add<JsonObject>();
-        b["index"]   = i;
-        b["name"]    = BAND_TABLE[i].name;
-        b["mode"]    = demodModeStr(BAND_TABLE[i].mode);
-        b["default"] = BAND_TABLE[i].freqDefault;
-        b["ssb"]     = isSoftSSBMode(BAND_TABLE[i].mode); // software SSB: no patch needed
+    // Band table is large — only include it on initial connect, not every 500ms update.
+    // The browser stores the band table from the first status message.
+    if (includeBands) {
+        JsonArray bands = doc["bands"].to<JsonArray>();
+        for (int i = 0; i < BAND_COUNT; i++) {
+            JsonObject b = bands.add<JsonObject>();
+            b["index"]   = i;
+            b["name"]    = BAND_TABLE[i].name;
+            b["mode"]    = demodModeStr(BAND_TABLE[i].mode);
+            b["default"] = BAND_TABLE[i].freqDefault;
+            b["ssb"]     = isSoftSSBMode(BAND_TABLE[i].mode);
+        }
     }
 }
 
@@ -299,9 +364,12 @@ void WebSocketHandler::_streamLoop() {
 
         vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(20)); // 50 Hz active loop
 
-        // Clean up disconnected clients periodically
+        // Clean up disconnected clients, then yield so async_tcp can run.
+        // Without the yield, async_tcp (also on CPU 0) can be starved long
+        // enough to trigger the task watchdog when a connection closes under load.
         if (_wsAudio) _wsAudio->cleanupClients();
         if (_wsRadio) _wsRadio->cleanupClients();
+        taskYIELD();
 
         // Stream audio frames (~50 per second)
         broadcastAudioFrame();

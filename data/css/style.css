@@ -21,7 +21,6 @@
   --freq-color:  #00d4ff;
   --rssi-color:  #00e676;
   --snr-color:   #448aff;
-  --waterfall-h: 200px;
   --font-mono:   'Courier New', Courier, monospace;
 }
 
@@ -196,6 +195,7 @@ header {
   border-radius: 4px;
   overflow: hidden;
   border: 1px solid var(--border);
+  position: relative;
 }
 
 .meter-bar {
@@ -208,40 +208,24 @@ header {
 .meter-rssi { background: linear-gradient(90deg, #00e676, #76ff03); }
 .meter-snr  { background: linear-gradient(90deg, #448aff, #82b1ff); }
 
+/* S-meter peak-hold tick */
+.meter-peak {
+  display: none;
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: #fff;
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
 .meter-value {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
   width: 44px;
   text-align: right;
-}
-
-/* ── Waterfall ────────────────────────────────────────────── */
-#waterfall-section {
-  background: #000;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-top: 6px;
-  overflow: hidden;
-}
-
-#waterfall-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-#waterfall-canvas {
-  display: block;
-  width: 100%;
-  height: var(--waterfall-h);
-  image-rendering: pixelated;
-  cursor: crosshair;
 }
 
 /* ── Controls ─────────────────────────────────────────────── */
@@ -288,7 +272,6 @@ header {
 .btn-primary   { background: var(--accent); color: #000; border-color: var(--accent); }
 .btn-secondary { background: var(--bg-control); color: var(--text); border-color: var(--border); }
 .btn-small     { padding: 4px 8px; font-size: 11px; }
-.btn-danger    { background: var(--red); color: #fff; border-color: var(--red); }
 
 .btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
 
@@ -379,8 +362,19 @@ header {
   user-select: none;
 }
 
-/* ── Audio section ────────────────────────────────────────── */
-#audio-section {
+/* ── Audio / info notices ─────────────────────────────────── */
+.notice-info {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  margin-top: 6px;
+}
+
+/* ── Memory channels ──────────────────────────────────────── */
+#memory-section {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -388,128 +382,33 @@ header {
   margin-top: 6px;
 }
 
-#audio-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.audio-status {
-  font-size: 12px;
-  color: var(--text-dim);
-  flex: 1;
-}
-
-.audio-latency {
+.section-header {
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-weight: 700;
   color: var(--text-dim);
-}
-
-/* ── FT8 section ──────────────────────────────────────────── */
-#ft8-section {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 6px;
-}
-
-#ft8-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: 0.04em;
-}
-
-#ft8-quick-tune {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-#ft8-freq-buttons {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-#ft8-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   margin-bottom: 8px;
+}
+
+.memory-slots-grid {
+  display: flex;
   flex-wrap: wrap;
-}
-
-.ft8-status {
-  font-size: 12px;
-  color: var(--text-dim);
-  flex: 1;
-}
-
-.ft8-timer {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--yellow);
-  width: 60px;
-  text-align: right;
-}
-
-#ft8-log-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  gap: 4px;
   margin-bottom: 6px;
-  font-size: 12px;
-  color: var(--text-dim);
+  min-height: 22px;
 }
 
-#ft8-log {
-  background: #000;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  height: 200px;
-  overflow-y: auto;
+.mem-btn {
   font-family: var(--font-mono);
-  font-size: 12px;
-  padding: 6px 8px;
+  font-size: 11px;
 }
-
-.ft8-row {
-  display: flex;
-  gap: 10px;
-  padding: 2px 0;
-  border-bottom: 1px solid #111;
-  white-space: nowrap;
-}
-
-.ft8-row:hover { background: #0d1117; }
-
-.ft8-time  { color: var(--text-dim); width: 50px; flex-shrink: 0; }
-.ft8-snr   { color: var(--yellow); width: 34px; flex-shrink: 0; text-align: right; }
-.ft8-dt    { color: var(--text-dim); width: 40px; flex-shrink: 0; text-align: right; }
-.ft8-freq  { color: var(--accent); width: 48px; flex-shrink: 0; text-align: right; }
-.ft8-msg   { color: var(--text); flex: 1; }
-
-.ft8-cq    { color: var(--green) !important; font-weight: 600; }
 
 /* ── Footer ───────────────────────────────────────────────── */
 footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 6px 4px;
   margin-top: 8px;
   border-top: 1px solid var(--border);
@@ -517,34 +416,6 @@ footer {
   color: var(--text-dim);
   font-family: var(--font-mono);
 }
-
-/* ── NTP status ───────────────────────────────────────────── */
-.text-input {
-  background: var(--bg-control);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 5px 10px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  width: 190px;
-  outline: none;
-}
-
-.text-input:focus { border-color: var(--accent); }
-
-.ntp-status {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ntp-synced   { color: var(--green); }
-.ntp-unsynced { color: var(--yellow); }
 
 /* ── Utility ──────────────────────────────────────────────── */
 .hidden { display: none !important; }

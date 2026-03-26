@@ -4,8 +4,8 @@
 // Manages two WebSocket endpoints:
 //
 //   ws://device/ws/audio
-//     Binary frames: raw 16-bit PCM at AUDIO_STREAM_RATE_HZ (16kHz)
-//     Each frame = 512 samples = 1024 bytes = 32ms of audio
+//     Binary frames: [4B uint32 timestamp ms][512 × int16 PCM @ 12kHz]
+//     Each frame = 512 samples = 1024 bytes PCM = 42.7ms of audio
 //     Browser uses Web Audio API AudioWorklet to play in real-time.
 //
 //   ws://device/ws/radio
@@ -58,7 +58,9 @@ private:
     static constexpr uint32_t STATUS_BROADCAST_MS = 500;
 
     void _handleRadioCommand(const String& json);
-    void _buildStatusJson(JsonDocument& doc);
+    // includeBands=true on initial connect, false for periodic 500ms updates
+    void _buildStatusJson(JsonDocument& doc, bool includeBands = false);
+    void _broadcastMemList();   // send mem_list JSON to all radio clients
     void _streamLoop();
 };
 

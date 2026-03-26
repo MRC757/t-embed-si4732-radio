@@ -1,27 +1,27 @@
 // ============================================================
-// AudioCapture.cpp — ADC Continuous Mode audio from IO17
-// Captures SI4732 analog audio output using ESP32-S3 ADC DMA.
+// AudioCapture.cpp — I2S Slave RX (Option 3 — NON-FUNCTIONAL)
+//
+// Option 3 was tested and FAILED: The SI4732-A10 digital audio pins
+// (DOUT/DFS/DCLK) are not wired to IO06/IO05/IO07 on this module PCB.
+// i2s_read() times out on every call. No audio data is produced.
+//
+// This code remains as a reference implementation.
+// A hardware modification is needed before audio capture works.
+// See AudioCapture.h for tested options and next steps.
+//
+// If/when wired: SI4732 DOUT/DFS/DCLK → IO06/IO05/IO07 → ESP32 I2S slave.
+// SI4732 outputs 48 kHz 16-bit stereo; decimated 4:1 → 12 kHz mono.
 // ============================================================
 #include "AudioCapture.h"
 #include "../dsp/SoftSSBDemod.h"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
-#if SPEAKER_SW_PASSTHROUGH
-#include <driver/i2s.h>   // ESP-IDF 4.4.x I2S driver
-#endif
 
 static const char* TAG = "AudioCapture";
 
-// ADC continuous read buffer — one DMA frame worth of raw results
-// Each result is 4 bytes: {data_high[3:0], channel[3:0], unit[1:0], data[11:0]}
-// Use SOC_ADC_DIGI_RESULT_BYTES macro; typically 4 bytes per sample on S3.
-#define ADC_RESULT_BYTES     4
-#define ADC_READ_BUF_SIZE    (AUDIO_DMA_BUF_LEN * ADC_RESULT_BYTES)
-
-// Speaker I2S handle (optional passthrough)
-#if SPEAKER_SW_PASSTHROUGH
-static i2s_chan_handle_t _spkTx = nullptr;
-#endif
+// I2S read buffer: 512 output samples × 4 (48→12 kHz) × 2 ch = 4096 int16
+#define I2S_RX_SAMPLES   (AUDIO_DMA_BUF_LEN * 4 * 2)   // stereo int16 at 48 kHz
+#define I2S_RX_BYTES     (I2S_RX_SAMPLES * sizeof(int16_t))
 
 // ============================================================
 // Constructor
@@ -39,18 +39,16 @@ AudioCapture::AudioCapture()
     , _writePos(0)
     , _readPos(0)
 {
-    memset(&_adcChars, 0, sizeof(_adcChars));
     _ringMutex = xSemaphoreCreateMutex();
     _dataReady = xSemaphoreCreateBinary();
     _taskDone  = xSemaphoreCreateBinary();
-    // Abort early rather than crash later with a NULL semaphore handle
     configASSERT(_ringMutex);
     configASSERT(_dataReady);
     configASSERT(_taskDone);
 }
 
 // ============================================================
-// begin()
+// begin() — I2S slave RX init
 // ============================================================
 bool AudioCapture::begin() {
     // Allocate ring buffer in PSRAM
@@ -59,108 +57,60 @@ bool AudioCapture::begin() {
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
     if (!_ringBuf) {
-        ESP_LOGE(TAG, "PSRAM alloc failed for audio ring buffer");
+        ESP_LOGE(TAG, "PSRAM alloc failed");
         return false;
     }
     memset(_ringBuf, 0, AUDIO_RING_CAPACITY * sizeof(int16_t));
 
-    // --- ADC calibration characterisation ---
-    // Corrects the ESP32-S3 SAR ADC INL bow (≈±50 LSB uncalibrated).
-    // esp_adc_cal_characterize() uses eFuse calibration values when present,
-    // otherwise falls back to ADC_VREF_MV (1100 mV).
-    esp_adc_cal_value_t calType = esp_adc_cal_characterize(
-        ADC_UNIT_1, AUDIO_ADC_ATTEN, ADC_WIDTH_BIT_12,
-        ADC_VREF_MV, &_adcChars
-    );
-    ESP_LOGI(TAG, "ADC cal: %s",
-        calType == ESP_ADC_CAL_VAL_EFUSE_VREF   ? "eFuse Vref" :
-        calType == ESP_ADC_CAL_VAL_EFUSE_TP     ? "eFuse two-point" :
-                                                   "default Vref");
-
-    // --- Configure ADC Continuous Mode (ESP-IDF 4.4.x adc_digi_* API) ---
-    // ESP32-S3 ADC1 Channel 6 = IO17 (PIN_SI4732_AUDIO)
-    adc_digi_init_config_t init_cfg = {
-        .max_store_buf_size = ADC_READ_BUF_SIZE * 4,  // 4 frames deep
-        .conv_num_each_intr = ADC_READ_BUF_SIZE,
-        .adc1_chan_mask      = BIT(AUDIO_ADC_CHANNEL),
-        .adc2_chan_mask      = 0,
+    // ── I2S slave RX — receives SI4732 digital audio output ──
+    // SI4732 is the I2S master; ESP32 listens as slave.
+    // BCLK=IO07, LRCLK=IO05, DATA=IO06 (same pins as speaker slot).
+    // SI4732 configured for 48 kHz 16-bit stereo by RadioController.
+    i2s_config_t i2s_cfg = {
+        .mode                 = (i2s_mode_t)(I2S_MODE_SLAVE | I2S_MODE_RX),
+        .sample_rate          = I2S_SLAVE_RATE_HZ,   // 48 kHz
+        .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count        = 8,
+        .dma_buf_len          = 512,
+        .use_apll             = false,
+        .tx_desc_auto_clear   = false,
+        .fixed_mclk           = 0,
+        .mclk_multiple        = I2S_MCLK_MULTIPLE_256,
+        .bits_per_chan         = I2S_BITS_PER_CHAN_16BIT,
     };
-    esp_err_t err = adc_digi_initialize(&init_cfg);
+    i2s_pin_config_t i2s_pins;
+    i2s_pins.mck_io_num   = I2S_PIN_NO_CHANGE;
+    i2s_pins.bck_io_num   = PIN_I2S_SPK_BCLK;   // IO07 — BCLK from SI4732
+    i2s_pins.ws_io_num    = PIN_I2S_SPK_WCLK;   // IO05 — LRCLK from SI4732
+    i2s_pins.data_out_num = I2S_PIN_NO_CHANGE;   // TX unused
+    i2s_pins.data_in_num  = PIN_I2S_SPK_DOUT;   // IO06 — DOUT from SI4732
+
+    esp_err_t err = i2s_driver_install((i2s_port_t)I2S_PORT_SPEAKER, &i2s_cfg, 0, nullptr);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "adc_digi_initialize failed: %s", esp_err_to_name(err));
-        heap_caps_free(_ringBuf);
-        _ringBuf = nullptr;
+        ESP_LOGE(TAG, "i2s_driver_install failed: %s", esp_err_to_name(err));
+        heap_caps_free(_ringBuf); _ringBuf = nullptr;
+        return false;
+    }
+    err = i2s_set_pin((i2s_port_t)I2S_PORT_SPEAKER, &i2s_pins);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2s_set_pin failed: %s", esp_err_to_name(err));
+        i2s_driver_uninstall((i2s_port_t)I2S_PORT_SPEAKER);
+        heap_caps_free(_ringBuf); _ringBuf = nullptr;
         return false;
     }
 
-    // Configure conversion pattern: single channel, IO17
-    adc_digi_pattern_config_t pattern = {
-        .atten      = AUDIO_ADC_ATTEN,
-        .channel    = (uint8_t)(AUDIO_ADC_CHANNEL & 0x7),
-        .unit       = 0,   // ADC_UNIT_1 = 0
-        .bit_width  = SOC_ADC_DIGI_MAX_BITWIDTH,
-    };
-
-    adc_digi_configuration_t adc_cfg = {
-        .conv_limit_en  = false,
-        .conv_limit_num = 0,
-        .pattern_num    = 1,
-        .adc_pattern    = &pattern,
-        .sample_freq_hz = AUDIO_SAMPLE_RATE_HZ,
-        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
-        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2, // ESP32-S3 format
-    };
-    err = adc_digi_controller_configure(&adc_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "adc_digi_controller_configure failed: %s", esp_err_to_name(err));
-        adc_digi_deinitialize();
-        heap_caps_free(_ringBuf);
-        _ringBuf = nullptr;
-        return false;
-    }
-
-#if SPEAKER_SW_PASSTHROUGH
-    // Configure speaker I2S for software passthrough (optional)
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
-        (i2s_port_t)I2S_PORT_SPEAKER, I2S_ROLE_MASTER
-    );
-    i2s_new_channel(&chan_cfg, &_spkTx, nullptr);
-    i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SPEAKER_SAMPLE_RATE_HZ),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                     I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
-            .bclk = (gpio_num_t)PIN_I2S_SPK_BCLK,
-            .ws   = (gpio_num_t)PIN_I2S_SPK_WCLK,
-            .dout = (gpio_num_t)PIN_I2S_SPK_DOUT,
-            .din  = I2S_GPIO_UNUSED,
-            .invert_flags = { .mclk_inv=false, .bclk_inv=false, .ws_inv=false },
-        },
-    };
-    i2s_channel_init_std_mode(_spkTx, &std_cfg);
-    i2s_channel_enable(_spkTx);
-#endif
-
-    // Start ADC
-    err = adc_digi_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "adc_digi_start failed: %s", esp_err_to_name(err));
-        adc_digi_deinitialize();
-        heap_caps_free(_ringBuf);
-        _ringBuf = nullptr;
-        return false;
-    }
     _running = true;
-
-    // Launch capture task on Core 1 (radio/audio core)
     xTaskCreatePinnedToCore(
-        captureTask, "AudioADC", STACK_AUDIO, this,
+        captureTask, "AudioI2S", STACK_AUDIO, this,
         TASK_PRIO_AUDIO, &_taskHandle, CORE_RADIO
     );
 
-    ESP_LOGI(TAG, "ADC audio capture started. IO17 @ %d Hz, 12-bit",
-             AUDIO_SAMPLE_RATE_HZ);
+    ESP_LOGI(TAG, "I2S slave RX started: port=%d BCLK=IO%d WS=IO%d DIN=IO%d @ %u Hz",
+             I2S_PORT_SPEAKER, PIN_I2S_SPK_BCLK, PIN_I2S_SPK_WCLK,
+             PIN_I2S_SPK_DOUT, I2S_SLAVE_RATE_HZ);
     return true;
 }
 
@@ -172,85 +122,75 @@ void AudioCapture::captureTask(void* arg) {
 }
 
 void AudioCapture::_captureLoop() {
-    // Raw ADC DMA read buffer
-    static uint8_t  rawBuf[ADC_READ_BUF_SIZE];
-    // Converted PCM buffer
-    static int16_t  pcmBuf[AUDIO_DMA_BUF_LEN];
+    // I2S RX buffer: stereo 16-bit at 48 kHz
+    // One frame = 512 output samples × 4 (ratio) × 2 ch = 4096 int16
+    static int16_t i2sBuf[I2S_RX_SAMPLES];
+    static int16_t pcmBuf[AUDIO_DMA_BUF_LEN];
 
     while (_running) {
-        uint32_t bytesRead = 0;
+        size_t bytesRead = 0;
+        esp_err_t ret = i2s_read((i2s_port_t)I2S_PORT_SPEAKER,
+                                  i2sBuf, I2S_RX_BYTES,
+                                  &bytesRead, pdMS_TO_TICKS(100));
 
-        // Block until DMA delivers a full frame (or 50ms timeout)
-        esp_err_t ret = adc_digi_read_bytes(rawBuf, ADC_READ_BUF_SIZE,
-                                             &bytesRead, 50);
+        if (ret != ESP_OK || bytesRead == 0) continue;
 
-        if (ret == ESP_ERR_TIMEOUT || bytesRead == 0) continue;
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ADC read error: %s", esp_err_to_name(ret));
-            continue;
-        }
+        // Stereo 48 kHz → mono 12 kHz: 4:1 decimation, L channel only.
+        // I2S layout: [L0, R0, L1, R1, ...] interleaved int16.
+        // Output sample n = i2sBuf[n * 4 * 2] = every 4th L channel.
+        uint32_t stereoFrames = bytesRead / (2 * sizeof(int16_t));
+        uint32_t pcmCount     = 0;
 
-        // Convert raw ADC results to signed int16 PCM.
-        // On ESP32-S3 with FORMAT_TYPE2, each result is 4 bytes:
-        //   bits[11:0]  = ADC data (12-bit)
-        //   bits[15:12] = channel
-        //   bits[17:16] = unit
-        uint32_t numResults = bytesRead / ADC_RESULT_BYTES;
-        uint32_t pcmCount   = 0;
+        for (uint32_t i = 0; i < stereoFrames && pcmCount < AUDIO_DMA_BUF_LEN; i += 4) {
+            int16_t raw = i2sBuf[i * 2];   // L channel of every 4th frame
 
-        for (uint32_t i = 0; i < numResults && pcmCount < AUDIO_DMA_BUF_LEN; i++) {
-            adc_digi_output_data_t* p = (adc_digi_output_data_t*)&rawBuf[i * ADC_RESULT_BYTES];
+            // IIR DC blocker (handles any residual DC from digital path)
+            float x = (float)raw;
+            float y = x - _dcX1 + 0.9999f * _dcY1;
+            _dcX1 = x;
+            _dcY1 = y;
 
-            // Verify this result is from our channel
-            if (p->type2.channel != (uint8_t)(AUDIO_ADC_CHANNEL & 0x7)) continue;
-
-            uint16_t raw = p->type2.data;
-            pcmBuf[pcmCount++] = _adcToSample(raw);
+            int32_t s = (int32_t)(y * _gain);
+            pcmBuf[pcmCount++] = (int16_t)constrain(s, -32768, 32767);
         }
 
         if (pcmCount == 0) continue;
 
-        // ── Software SSB product detection ───────────────────────
+        // SSB product detector (SSB/CW modes only)
         softSSBDemod.process(pcmBuf, pcmCount);
 
-        // ── Software AGC ─────────────────────────────────────────
-        // Applied after SSB demod so the gain tracks the demodulated
-        // signal level, not the raw AM envelope.
+        // Software AGC
         _applyAGC(pcmBuf, pcmCount);
 
-#if SPEAKER_SW_PASSTHROUGH
-        // Route to speaker I2S
-        size_t written;
-        i2s_channel_write(_spkTx, pcmBuf, pcmCount * sizeof(int16_t),
-                          &written, 0);
-#endif
+        // Diagnostics every ~5 seconds (120 frames × ~42 ms each)
+        static uint32_t _diagFrames = 0;
+        if (++_diagFrames % 120 == 0) {
+            ESP_LOGI(TAG, "AGC gain=%.2f  pcm=%u samples  i2s=%u bytes",
+                     _agcGain, (unsigned)pcmCount, (unsigned)bytesRead);
+        }
 
         _writeSamplesToRing(pcmBuf, pcmCount);
         xSemaphoreGive(_dataReady);
     }
 
-    adc_digi_stop();
-    adc_digi_deinitialize();
+    i2s_driver_uninstall((i2s_port_t)I2S_PORT_SPEAKER);
     if (_ringBuf) heap_caps_free(_ringBuf);
     xSemaphoreGive(_taskDone);
     vTaskDelete(NULL);
 }
 
 // ============================================================
-// read()
+// read / available / flush / end
 // ============================================================
 size_t AudioCapture::read(int16_t* buf, size_t maxSamples, TickType_t waitTicks) {
     xSemaphoreTake(_dataReady, waitTicks);
-
     xSemaphoreTake(_ringMutex, portMAX_DELAY);
     size_t avail  = (_writePos - _readPos) & (AUDIO_RING_CAPACITY - 1);
     size_t toRead = min(avail, maxSamples);
-    for (size_t i = 0; i < toRead; i++) {
+    for (size_t i = 0; i < toRead; i++)
         buf[i] = _ringBuf[(_readPos + i) & (AUDIO_RING_CAPACITY - 1)];
-    }
     _readPos = (_readPos + toRead) & (AUDIO_RING_CAPACITY - 1);
     xSemaphoreGive(_ringMutex);
-
     return toRead;
 }
 
@@ -267,7 +207,6 @@ void AudioCapture::flush() {
 void AudioCapture::end() {
     if (!_running) return;
     _running = false;
-    // Wait for the capture task to exit cleanly (it calls vTaskDelete itself)
     xSemaphoreTake(_taskDone, pdMS_TO_TICKS(500));
     _taskHandle = nullptr;
 }
@@ -287,26 +226,13 @@ void AudioCapture::_writeSamplesToRing(const int16_t* samples, size_t count) {
 }
 
 // ============================================================
-// _applyAGC()
-// Measures the RMS of the current frame, then adjusts _agcGain
-// toward (AGC_TARGET_RMS / rms) using separate attack/release
-// rates.  Gain is clamped to [AGC_MIN_GAIN, AGC_MAX_GAIN].
-// The adjusted gain is then applied in-place to the buffer.
-// Called with silence (rms < 10) the gain is held to prevent
-// runaway amplification between transmissions.
+// _applyAGC
 // ============================================================
 void AudioCapture::_applyAGC(int16_t* buf, size_t count) {
     if (!_agcEnabled || count == 0) return;
-
-    // Compute RMS
     float sumSq = 0.0f;
-    for (size_t i = 0; i < count; i++) {
-        float s = (float)buf[i];
-        sumSq += s * s;
-    }
+    for (size_t i = 0; i < count; i++) { float s = (float)buf[i]; sumSq += s * s; }
     float rms = sqrtf(sumSq / (float)count);
-
-    // Only adjust gain when signal is present (not silence/noise floor)
     if (rms > 10.0f) {
         float desired = AGC_TARGET_RMS / rms;
         float alpha   = (desired < _agcGain) ? AGC_ATTACK : AGC_RELEASE;
@@ -314,8 +240,6 @@ void AudioCapture::_applyAGC(int16_t* buf, size_t count) {
         if (_agcGain < AGC_MIN_GAIN) _agcGain = AGC_MIN_GAIN;
         if (_agcGain > AGC_MAX_GAIN) _agcGain = AGC_MAX_GAIN;
     }
-
-    // Apply gain in-place
     for (size_t i = 0; i < count; i++) {
         int32_t s = (int32_t)((float)buf[i] * _agcGain);
         if (s >  32767) s =  32767;

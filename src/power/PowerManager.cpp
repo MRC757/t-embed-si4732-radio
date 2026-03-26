@@ -89,14 +89,21 @@ bool PowerManager::_initCharger() {
 // standard GAUGE command register interface directly.
 // ============================================================
 bool PowerManager::_initGauge() {
-    // Probe: attempt to read the voltage register
+    // Probe: write register address, then read 2 bytes back.
+    // endTransmission(false) alone can return 0 on a floating/noisy bus
+    // giving a false ACK.  Requiring a successful requestFrom() confirms
+    // the device is actually present and readable.
     Wire.beginTransmission(BQ27220_ADDR);
     Wire.write(BQ27220_REG_VOLT);
-    uint8_t err = Wire.endTransmission(false);
-    if (err != 0) {
+    if (Wire.endTransmission(false) != 0) {
         ESP_LOGW(TAG, "BQ27220 (0x55) not found — using charger ADC for voltage");
         return false;
     }
+    if (Wire.requestFrom((uint8_t)BQ27220_ADDR, (uint8_t)2) < 2) {
+        ESP_LOGW(TAG, "BQ27220 (0x55) not readable — using charger ADC for voltage");
+        return false;
+    }
+    Wire.read(); Wire.read();   // discard probe bytes
     ESP_LOGI(TAG, "BQ27220 fuel gauge found at 0x55");
     return true;
 }

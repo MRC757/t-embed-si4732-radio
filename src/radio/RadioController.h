@@ -20,6 +20,7 @@ struct RadioStatus {
     DemodMode mode;
     int       bandIndex;
     uint8_t   rssi;
+    uint8_t   rssiPeak;        // Peak-hold RSSI (decays ~1 dB/s after 3 s hold)
     uint8_t   snr;
     bool      stereo;
     int8_t    agcGain;
@@ -36,6 +37,16 @@ struct RadioStatus {
     bool      isCharging;       // from BQ25896 / BQ27220 current sign
     bool      isUsbConnected;   // VBUS present
     uint32_t  i2cErrors;
+};
+
+// A single memory channel slot (populated by getMemorySlot())
+struct MemorySlot {
+    bool      valid;
+    int       slot;
+    uint32_t  freqKHz;
+    DemodMode mode;
+    int       bandIndex;
+    char      name[32];
 };
 
 class RadioController {
@@ -74,6 +85,12 @@ public:
     // AGC
     void  setAGC(bool enable, uint8_t gain = 0);
 
+    // Memory channels (NVS-backed, 10 slots)
+    static constexpr int MEM_SLOTS = 10;
+    void saveMemory(int slot, const char* label = "");
+    bool loadMemory(int slot);
+    bool getMemorySlot(int slot, MemorySlot& out) const;
+
     // Status
     const RadioStatus& getStatus() const { return _status; }
     SI4735&            getSI4735()        { return _radio; }
@@ -92,6 +109,10 @@ private:
     int       _dialKHz;        // current dial frequency
     int       _bfoTrimHz;      // user BFO trim (±500 Hz)
 
+    // S-meter peak hold
+    uint8_t   _rssiPeak;
+    uint32_t  _rssiPeakDecayMs;
+
     // SSB merged-frequency state (same as before for smooth encoder tuning)
     int       _ssbDialKHz;     // dial frequency (kHz, integer)
     int       _ssbFineTuneHz;  // sub-kHz BFO fine-tune (±500 Hz)
@@ -101,13 +122,20 @@ private:
     // I2C watchdog
     uint32_t  _i2cErrors;
     uint32_t  _consecutiveErrors;
-    static constexpr uint32_t I2C_RESET_THRESHOLD = 10;
+    // RSSI=0/SNR=0 can mean "no signal" (normal) OR a real I2C failure.
+    // A high threshold avoids spurious bus resets when the receiver is
+    // simply not picking up any stations (e.g. no antenna connected).
+    // 300 × 200ms = 60 s of consistent zeros before concluding bus failure.
+    static constexpr uint32_t I2C_RESET_THRESHOLD = 300;
 
     // Polling timers
     uint32_t  _lastRSSIms, _lastRDSms, _lastBatms;
     static constexpr uint32_t RSSI_POLL_MS = 200;
     static constexpr uint32_t RDS_POLL_MS  = 100;
     static constexpr uint32_t BAT_POLL_MS  = 5000;
+
+    void     _savePrefs();        // update RTC vars + debounced NVS write
+    void     _loadPrefs();        // restore from RTC (deep sleep) or NVS
 
     void     _applyMode(DemodMode mode, uint32_t dialKHz);
     uint32_t _chipFreqForDial(uint32_t dialKHz);

@@ -11,6 +11,7 @@
 #include "../config/PinConfig.h"
 #include <ESP32Encoder.h>
 #include <esp_log.h>
+#include <esp_sleep.h>
 
 static const char* TAG = "Encoder";
 extern RadioController radioController;
@@ -28,13 +29,15 @@ static uint32_t  lastClickMs       = 0;
 static int       clickCount        = 0;
 static bool      longPressHandled  = false;
 static bool      pendingSingleClick = false;
+static int       lastSleepSecsLeft = -1;  // guards setSleepCountdown calls
 
-static constexpr uint32_t LONG_PRESS_MS   = 800;
-static constexpr uint32_t DOUBLE_CLICK_MS = 400;
+static constexpr uint32_t LONG_PRESS_MS   =   800;
+static constexpr uint32_t DOUBLE_CLICK_MS =   400;
+static constexpr uint32_t SLEEP_PRESS_MS  = 10000;  // 10 s hold → deep sleep
 
 void EncoderHandler::begin() {
     ESP32Encoder::useInternalWeakPullResistors = puType::UP;
-    encoder.attachHalfQuad(PIN_ENC_A, PIN_ENC_B);
+    encoder.attachSingleEdge(PIN_ENC_A, PIN_ENC_B);
     encoder.setCount(0);
 
     pinMode(PIN_ENC_BTN, INPUT_PULLUP);
@@ -82,10 +85,24 @@ void EncoderHandler::_inputLoop() {
                 pendingSingleClick = false; // cancel any deferred tap
                 _handleLongPress();
             }
+
+            // Sleep countdown — show overlay after 1 s, sleep at 10 s
+            uint32_t heldMs = now - btnPressMs;
+            if (heldMs >= SLEEP_PRESS_MS) {
+                _enterDeepSleep();   // never returns
+            } else if (heldMs >= 1000) {
+                int secsLeft = (int)((SLEEP_PRESS_MS - heldMs + 999) / 1000);
+                if (secsLeft != lastSleepSecsLeft) {
+                    lastSleepSecsLeft = secsLeft;
+                    displayManager.setSleepCountdown(secsLeft);
+                }
+            }
         }
 
         if (!btnNow && btnLastState) {
-            // Released
+            // Released — cancel any sleep countdown
+            lastSleepSecsLeft = -1;
+            displayManager.setSleepCountdown(-1);
             if (!longPressHandled) {
                 uint32_t elapsed = now - lastClickMs;
                 if (elapsed < DOUBLE_CLICK_MS) {
@@ -119,8 +136,8 @@ void EncoderHandler::_inputLoop() {
 }
 
 void EncoderHandler::_handleEncoderDelta(int delta) {
-    // Normalise: encoder half-quad gives 2 counts per detent
-    int steps = delta / 2;
+    // Normalise: attachSingleEdge gives 1 count per detent
+    int steps = (int)delta;
     if (steps == 0) return;
 
     displayManager.wakeDisplay();
@@ -182,6 +199,24 @@ void EncoderHandler::_handleDoubleClick() {
         radioController.setBFOTrim(0);
         ESP_LOGI(TAG, "BFO trim reset to 0");
     }
+}
+
+int EncoderHandler::getTargetIndex() const {
+    return (int)currentTarget;
+}
+
+// ============================================================
+// _enterDeepSleep — called after SLEEP_PRESS_MS button hold
+//
+// Wake source: EXT0 on PIN_ENC_BTN (IO0), level = LOW (button press).
+// On wake the ESP32-S3 performs a full reboot through setup().
+// ============================================================
+void EncoderHandler::_enterDeepSleep() {
+    ESP_LOGI(TAG, "Deep sleep initiated — wake by button press (IO%d)", PIN_ENC_BTN);
+    displayManager.drawSleepScreen();  // render final frame + blank backlight (~600 ms)
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ENC_BTN, 0);  // wake on LOW
+    esp_deep_sleep_start();
+    // never reached
 }
 
 EncoderHandler encoderHandler;

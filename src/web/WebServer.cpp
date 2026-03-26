@@ -25,6 +25,7 @@
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <esp_log.h>
 #include <esp_sntp.h>
 #include <freertos/timers.h>
@@ -248,7 +249,7 @@ static void wifiBegin() {
 
     // AP always starts first so device is reachable immediately
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(AP_SSID, AP_PASS);
+    WiFi.softAP(AP_SSID);   // Open AP — no password
     _apIP = WiFi.softAPIP().toString();
     ESP_LOGI(TAG, "AP started: SSID=%s  IP=%s", AP_SSID, _apIP.c_str());
 
@@ -292,8 +293,26 @@ static void wifiBegin() {
     ESP_LOGI(TAG, "STA connected. STA IP=%s  AP IP=%s",
              WiFi.localIP().toString().c_str(), _apIP.c_str());
 
-    // Modem power save — reduces TX current ~30% at cost of ~1ms extra latency
-    WiFi.setSleep(true);
+    // OTA firmware update — hostname "t-embed-radio" for mDNS / PlatformIO
+    ArduinoOTA.setHostname("t-embed-radio");
+    ArduinoOTA.onStart([]() {
+        ESP_LOGI("OTA", "OTA update starting");
+    });
+    ArduinoOTA.onEnd([]() {
+        ESP_LOGI("OTA", "OTA update complete — rebooting");
+    });
+    ArduinoOTA.onError([](ota_error_t e) {
+        ESP_LOGE("OTA", "OTA error %u", e);
+    });
+    ArduinoOTA.begin();
+    ESP_LOGI(TAG, "OTA ready — hostname: t-embed-radio  IP: %s",
+             WiFi.localIP().toString().c_str());
+
+    // Modem sleep disabled: on ESP32-S3, WiFi modem sleep triggers periodic
+    // RF calibration that preempts ADC1 (shared RF front-end). Each preemption
+    // causes adc_digi_read_bytes() to return ESP_ERR_INVALID_STATE and forces
+    // a DMA stop/restart, creating audible clicks in the audio stream.
+    WiFi.setSleep(false);
 
     // Start NTP (async). Callback fires when first sync completes.
     sntp_set_time_sync_notification_cb(_ntpSyncCb);
@@ -544,7 +563,7 @@ void webServerBegin() {
     httpServer.on("/api/band",     HTTP_POST,
         [](AsyncWebServerRequest* r){}, nullptr, handleBand);
 
-    // ── Static files ──
+    // ── Static files (JS, CSS, images, etc.) ──
     httpServer.serveStatic("/", LittleFS, "/")
               .setDefaultFile("index.html")
               .setCacheControl("max-age=600");
@@ -576,5 +595,8 @@ void webServerBegin() {
 void webLoop() {
     if (_captivePortalActive) {
         dnsServer.processNextRequest();
+    }
+    if (_staConnected) {
+        ArduinoOTA.handle();
     }
 }

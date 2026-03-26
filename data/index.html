@@ -17,8 +17,7 @@
     </div>
     <div id="header-center">T-Embed SI4732</div>
     <div id="header-right">
-      <span id="bat-display" title="Battery">&#128267;</span>
-      <span id="wifi-display">&#128246;</span>
+      <span id="bat-display" title="Battery"></span>
     </div>
   </header>
 
@@ -47,6 +46,7 @@
       <span class="meter-label">RSSI</span>
       <div class="meter-bar-bg">
         <div id="rssi-bar" class="meter-bar meter-rssi"></div>
+        <div id="rssi-peak" class="meter-peak"></div>
       </div>
       <span id="rssi-value" class="meter-value">0</span>
     </div>
@@ -59,19 +59,10 @@
     </div>
   </section>
 
-  <!-- ========================================================
-       WATERFALL
-  ======================================================== -->
-  <section id="waterfall-section">
-    <div id="waterfall-header">
-      <span>Spectrum</span>
-      <span id="waterfall-range">0 – 6000 Hz</span>
-      <label class="toggle-label">
-        <input type="checkbox" id="waterfall-enabled" checked> Live
-      </label>
-    </div>
-    <canvas id="waterfall-canvas" width="512" height="200"></canvas>
-  </section>
+  <!-- Audio unavailable notice -->
+  <div id="audio-notice" class="notice-info">
+    Audio: speaker active — web streaming requires hardware modification
+  </div>
 
   <!-- ========================================================
        CONTROLS
@@ -86,6 +77,9 @@
       <button id="btn-tune" class="btn btn-primary">Tune</button>
       <button id="btn-step-up" class="btn btn-secondary" title="Step up">&#9654;</button>
       <button id="btn-seek-up" class="btn btn-secondary" title="Seek up">&#9654;&#9654;</button>
+    </div>
+    <div id="seek-indicator" class="hidden" style="font-size:12px;color:var(--yellow);padding:2px 0;">
+      Seeking&hellip;
     </div>
 
     <!-- Mode row -->
@@ -106,7 +100,7 @@
       <select id="band-select"></select>
     </div>
 
-    <!-- Volume + AGC row -->
+    <!-- Volume + AGC -->
     <div class="control-row">
       <span class="control-label">Vol:</span>
       <input type="range" id="volume-slider" min="0" max="63" value="40" class="slider">
@@ -127,124 +121,31 @@
   </section>
 
   <!-- ========================================================
-       AUDIO PLAYER
+       MEMORY CHANNELS
   ======================================================== -->
-  <section id="audio-section">
-    <div id="audio-controls">
-      <button id="btn-audio-play" class="btn btn-primary" title="Start audio">
-        &#9654; Start Audio
-      </button>
-      <button id="btn-audio-stop" class="btn btn-secondary hidden" title="Stop audio">
-        &#9646;&#9646; Stop
-      </button>
-      <span id="audio-status" class="audio-status">Click Start Audio to begin streaming</span>
-      <span id="audio-latency" class="audio-latency"></span>
-    </div>
-  </section>
-
-  <!-- ========================================================
-       FT8 / FT4 DECODER
-  ======================================================== -->
-  <section id="ft8-section">
-    <div id="ft8-header">
-      <span class="section-title">FT8 / FT4 Decoder</span>
-      <div id="ft8-quick-tune">
-        <span class="control-label">Quick:</span>
-        <div id="ft8-freq-buttons"></div>
-      </div>
-    </div>
-
-    <!-- NTP time sync settings -->
-    <div class="control-row" id="ntp-row">
-      <span class="control-label" style="width:auto;margin-right:4px">NTP:</span>
-      <input type="text" id="ntp-server" class="text-input" placeholder="pool.ntp.org"
-             title="NTP server address — leave blank for pool.ntp.org">
-      <button id="btn-ntp-save" class="btn btn-secondary btn-small">Set</button>
-      <span id="ntp-status" class="ntp-status ntp-unsynced">checking…</span>
-    </div>
-
-    <div id="ft8-controls">
-      <button id="btn-ft8-start" class="btn btn-primary">Start FT8</button>
-      <button id="btn-ft8-stop" class="btn btn-secondary hidden">Stop FT8</button>
-      <button id="btn-ft8-sync" class="btn btn-secondary"
-              title="Snap the 15-second slot boundary to right now. Press when you hear the first FT8 tones — useful when NTP is unavailable.">Sync Now</button>
-      <span id="ft8-status" class="ft8-status">Ready — tune to an FT8 frequency then press Start</span>
-      <span id="ft8-slot-timer" class="ft8-timer"></span>
-    </div>
-
-    <div id="ft8-log-header">
-      <span>Decoded Messages</span>
-      <button id="btn-ft8-clear" class="btn btn-secondary btn-small">Clear</button>
-    </div>
-    <div id="ft8-log"></div>
-  </section>
-
-  <!-- ========================================================
-       JS8CALL DECODER
-  ======================================================== -->
-  <section id="js8-section">
-    <div id="js8-header">
-      <span class="section-title">JS8Call Decoder</span>
-    </div>
-
-    <!-- Speed mode selector -->
-    <div class="control-row">
-      <span class="control-label" style="width:auto;margin-right:6px">Mode:</span>
-      <select id="js8-mode" class="freq-input" style="width:180px">
-        <option value="1" selected>Normal  (15.6 s)</option>
-        <option value="2">Fast    (10 s)</option>
-        <option value="3">Turbo   (6 s)</option>
-        <option value="0">Slow    (30 s)</option>
+  <section id="memory-section">
+    <div class="section-header">Memory Channels</div>
+    <div id="memory-slots" class="memory-slots-grid"></div>
+    <div class="control-row" style="margin-top:6px">
+      <span class="control-label">Slot:</span>
+      <select id="mem-slot-select" class="freq-input" style="width:60px">
+        <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+        <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option><option value="8">8</option>
+        <option value="9">9</option>
       </select>
+      <input type="text" id="mem-name" class="freq-input" placeholder="Label (optional)" style="flex:1;max-width:160px">
+      <button id="btn-mem-save" class="btn btn-secondary btn-small">Save current</button>
     </div>
-
-    <div id="js8-controls">
-      <button id="btn-js8-start" class="btn btn-primary">Start JS8Call</button>
-      <button id="btn-js8-stop" class="btn btn-secondary hidden">Stop JS8Call</button>
-      <span id="js8-status" class="ft8-status">Ready — tune to a JS8Call frequency then press Start</span>
-    </div>
-
-    <div id="js8-log-header">
-      <span>Decoded Messages</span>
-      <button id="btn-js8-clear" class="btn btn-secondary btn-small">Clear</button>
-    </div>
-    <div id="js8-log"></div>
-  </section>
-
-  <!-- ========================================================
-       CW DECODER
-  ======================================================== -->
-  <section id="cw-section">
-    <div id="cw-header">
-      <span class="section-title">CW Decoder</span>
-      <span id="cw-wpm" class="cw-wpm"></span>
-      <button id="btn-cw-clear" class="btn btn-secondary btn-small">Clear</button>
-    </div>
-    <div id="cw-controls">
-      <button id="btn-cw-start" class="btn btn-primary">Start CW</button>
-      <button id="btn-cw-stop" class="btn btn-secondary hidden">Stop CW</button>
-      <span id="cw-status" class="cw-status">Select CW mode, then press Start CW</span>
-    </div>
-    <div id="cw-log"></div>
   </section>
 
   <!-- ========================================================
        FOOTER / STATUS
   ======================================================== -->
   <footer>
-    <span id="footer-ssb">SSB: checking…</span>
-    <span id="footer-dropped">Dropped: 0</span>
     <span id="footer-ts"></span>
   </footer>
 
-  <!-- ========================================================
-       SCRIPTS — order matters
-  ======================================================== -->
-  <script src="/js/audio.js"></script>
-  <script src="/js/waterfall.js"></script>
-  <script src="/js/ft8.js"></script>
-  <script src="/js/js8call.js"></script>
-  <script src="/js/cw.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

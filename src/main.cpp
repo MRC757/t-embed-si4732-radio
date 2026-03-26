@@ -4,16 +4,17 @@
 // Initialisation order (matters — do not reorder):
 //   1.  Serial
 //   2.  APA102 LED (visual boot progress)
-//   3.  I2C scanner — auto-detects SDA/SCL pin order,
+//   3.  IO46 HIGH — powers SI4732 module and its I2C pull-ups
+//   4.  I2C scanner — auto-detects SDA/SCL pin order,
 //         leaves Wire configured on the winning pins
-//   4.  PowerManager (BQ25896 charger + BQ27220 fuel gauge)
+//   5.  PowerManager (BQ25896 charger + BQ27220 fuel gauge)
 //         Must run BEFORE radio so charging is enabled immediately
-//   5.  RadioController (SI4732 via I2C)
-//   6.  AudioCapture (ADC DMA on IO17)
-//   7.  FFTProcessor (waterfall DSP)
-//   8.  EncoderHandler (rotary input)
-//   9.  WebServer (Wi-Fi + HTTP + WebSocket)
-//   10. FreeRTOS tasks
+//   6.  RadioController (SI4732 via I2C)
+//   7.  AudioCapture (ADC on IO17 — Option 1 passive mute bias test)
+//   8.  FFTProcessor (waterfall DSP)
+//   9.  EncoderHandler (rotary input)
+//   10. WebServer (Wi-Fi + HTTP + WebSocket)
+//   11. FreeRTOS tasks
 //
 // Task layout:
 //   Core 1 (radio/audio):
@@ -31,6 +32,7 @@
 #include <Wire.h>
 #include <FastLED.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 
 #include "config/PinConfig.h"
 #include "power/I2CScanner.h"
@@ -81,6 +83,20 @@ void setup() {
     Serial.println("\n\n=== T-Embed SI4732 Web Radio ===");
     Serial.printf("IDF: %s\n", esp_get_idf_version());
 
+    // Log why we rebooted — critical for diagnosing unexpected resets
+    esp_reset_reason_t resetReason = esp_reset_reason();
+    const char* resetStr =
+        resetReason == ESP_RST_POWERON   ? "POWER_ON"    :
+        resetReason == ESP_RST_EXT       ? "EXT_PIN"     :
+        resetReason == ESP_RST_SW        ? "SOFTWARE"    :
+        resetReason == ESP_RST_PANIC     ? "PANIC/CRASH" :
+        resetReason == ESP_RST_INT_WDT   ? "INT_WDT"     :
+        resetReason == ESP_RST_TASK_WDT  ? "TASK_WDT"    :
+        resetReason == ESP_RST_WDT       ? "OTHER_WDT"   :
+        resetReason == ESP_RST_DEEPSLEEP ? "DEEP_SLEEP"  :
+        resetReason == ESP_RST_BROWNOUT  ? "BROWNOUT"    : "UNKNOWN";
+    Serial.printf("[init] Reset reason: %s (%d)\n", resetStr, (int)resetReason);
+
     // --------------------------------------------------------
     // 1. APA102 status LED — red during boot
     //
@@ -96,7 +112,23 @@ void setup() {
     setLED(CRGB::Red);
 
     // --------------------------------------------------------
-    // 2. I2C auto-detection
+    // 2. SI4732 module power enable — MUST precede I2C scan.
+    //
+    // The SI4732 module plugs into a connector on the T-Embed.
+    // The I2C pull-up resistors are on the module PCB and are
+    // only powered when IO46 is HIGH.  Without this the bus
+    // floats and both SDA/SCL pin orders find 0 devices.
+    //
+    // RadioController::begin() also asserts IO46, but that runs
+    // at step 5 — long after the I2C scanner at step 3.
+    // --------------------------------------------------------
+    pinMode(PIN_SI4732_PWR, OUTPUT);
+    digitalWrite(PIN_SI4732_PWR, HIGH);
+    delay(100);   // allow module VCC + pull-ups to settle
+    Serial.println("[init] IO46 HIGH — SI4732 module powered");
+
+    // --------------------------------------------------------
+    // 3. I2C auto-detection
     //
     // Tries SDA/SCL in both possible orders, reports all found
     // devices, leaves Wire on the winning configuration.
@@ -115,7 +147,7 @@ void setup() {
                   scanResult.sda, scanResult.scl, scanResult.devicesFound);
 
     // --------------------------------------------------------
-    // 3. Power management — BQ25896 + BQ27220
+    // 5. Power management — BQ25896 + BQ27220
     //
     // CRITICAL: Without this step the battery will NOT charge
     // from USB-C. The BQ25896 requires explicit enableCharge()
@@ -133,13 +165,13 @@ void setup() {
     }
 
     // --------------------------------------------------------
-    // 4. Display
+    // 6. Display
     // --------------------------------------------------------
     displayManager.begin();
     Serial.println("[init] Display ready");
 
     // --------------------------------------------------------
-    // 5. Radio (SI4732, software SSB, no patch required)
+    // 7. Radio (SI4732, software SSB, no patch required)
     // --------------------------------------------------------
     setLED(CRGB::Orange);
     if (!radioController.begin()) {
@@ -153,16 +185,24 @@ void setup() {
     Serial.println("[init] SI4732 ready");
 
     // --------------------------------------------------------
-    // 6. Audio capture — ADC DMA on IO17
+    // 8. Speaker unmute + Option 3 audio capture.
+    //
+    // IO17 driven LOW to unmute the analog speaker amp.
+    // AudioCapture uses I2S_NUM_1 as slave RX on IO07/05/06
+    // to receive SI4732 digital audio output (48 kHz stereo).
     // --------------------------------------------------------
+    pinMode(PIN_AUDIO_MUTE, OUTPUT);
+    digitalWrite(PIN_AUDIO_MUTE, LOW);
+    Serial.println("[init] Speaker unmuted (IO17 LOW)");
+
     if (!audioCapture.begin()) {
-        Serial.println("[WARN] Audio capture failed — streaming disabled");
+        Serial.println("[WARN] Audio capture failed — web stream disabled");
     } else {
-        Serial.println("[init] Audio capture ready (IO17, 12kHz)");
+        Serial.println("[init] I2S slave RX ready (IO06/05/07 @ 48kHz)");
     }
 
     // --------------------------------------------------------
-    // 7. FFT waterfall
+    // 9. FFT waterfall
     // --------------------------------------------------------
     if (!fftProcessor.begin()) {
         Serial.println("[WARN] FFT failed — waterfall disabled");
@@ -171,20 +211,20 @@ void setup() {
     }
 
     // --------------------------------------------------------
-    // 8. Encoder
+    // 10. Encoder
     // --------------------------------------------------------
     encoderHandler.begin();
     Serial.println("[init] Encoder ready");
 
     // --------------------------------------------------------
-    // 9. Wi-Fi + web server
+    // 11. Wi-Fi + web server
     // --------------------------------------------------------
     setLED(CRGB::Blue);
     webServerBegin();
     Serial.println("[init] Web server ready");
 
     // --------------------------------------------------------
-    // 10. FreeRTOS tasks
+    // 12. FreeRTOS tasks
     // --------------------------------------------------------
     static TaskHandle_t radioTaskHandle = nullptr;
     xTaskCreatePinnedToCore(
@@ -251,7 +291,7 @@ void loop() {
                       "Bat=%d%% %.2fV%s "
                       "Heap=%u PSRAM=%u Drop=%lu\n",
                       demodModeStr(s.mode),
-                      s.dialKHz / 1000.0f,
+                      s.displayFreqHz / 1000000.0f,
                       s.rssi, s.snr,
                       s.batteryPercent,
                       s.batteryVolts,
@@ -260,6 +300,9 @@ void loop() {
                       ESP.getFreePsram(),
                       (unsigned long)audioCapture.droppedSamples());
         radioController.unlockStatus();
+        // Stack high-water marks help diagnose overflow-related resets
+        Serial.printf("[diag] Stack HWM: loop=%u\n",
+                      uxTaskGetStackHighWaterMark(NULL));
     }
 
     vTaskDelay(pdMS_TO_TICKS(5));
