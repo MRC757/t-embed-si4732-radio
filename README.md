@@ -16,24 +16,68 @@ real-time S-meter, NTP time sync, OTA updates, and 10 memory channels.
 - **Citizens Band (CB)** — 26.965–27.405 MHz AM, 40 channels, ch 19 default
 - **Marine HF** — 4 / 8 / 16 MHz USB voice bands with ITU calling frequencies
 - **Time signals** — WWV/WWVH at 2.5 / 5 / 10 / 15 / 20 MHz (AM)
-- **LSB / USB (SSB)** — all HAM bands 160m through 10m, software demodulated
-- **CW** — software demodulated with 700 Hz BFO
+- **LSB / USB (SSB)** — all HAM bands 160m through 10m *(chip configured; see SSB status below)*
+- **CW** — 700 Hz BFO offset *(chip configured; see SSB status below)*
 - **36 pre-configured bands** including all major HAM, broadcast, CB, Marine HF, and WWV allocations
 
 > **Out-of-range note:** GMRS (462 MHz), FRS (462–467 MHz), MURS (151–154 MHz),
 > and VHF Air (118–136 MHz) are **above the SI4732's 30 MHz upper limit** and
 > cannot be received with this hardware.
 
-### SSB — No Patch Required
-SSB and CW reception uses a **software product detector** (`SoftSSBDemod`)
-running on the ESP32-S3. The SI4732 stays in AM mode; the ESP32 multiplies the
-audio by a synthesized BFO carrier and low-pass filters the result. This
-eliminates the fragile Silicon Labs binary patch entirely:
+### SSB — Current Status
 
-- No I2C patch download at boot
-- No patch wipe on mode switch
-- No reload after setFM()/setAM()
-- Instant mode switching between AM, FM, SSB, CW
+**SSB and CW do not produce usable audio on the speaker with current hardware.**
+
+Two separate limitations prevent SSB from functioning:
+
+#### 1. Speaker path bypasses the ESP32
+
+The speaker is wired directly from the SI4732 analog output through its on-module
+amp. The ESP32 controls only the mute pin (IO17). It has no role in the audio
+signal itself:
+
+```
+SI4732 LOUT ──► analog amp ──► speaker
+                    │
+              IO17 (mute only)
+```
+
+When SSB or CW mode is selected, the SI4732 is placed in **AM mode** with a
+tuning offset so the sideband falls in the 3 kHz AM passband. However, AM
+detection of a suppressed-carrier SSB signal without carrier reinsertion produces
+distorted, unintelligible audio at the speaker — a "Donald Duck" effect.
+
+The software product detector (`SoftSSBDemod`) only processes audio in the ESP32's
+capture pipeline, which feeds the web stream — it cannot affect the speaker path.
+
+#### 2. Web stream audio capture is non-functional
+
+`SoftSSBDemod` is fully implemented (DDS BFO oscillator, 4th-order Butterworth
+LPF) and would correctly demodulate SSB for the web stream — but `AudioCapture`
+has no audio input. Both software attempts to capture audio have failed:
+
+- **IO17 ADC:** SI4732 LOUT DC bias (~1.65 V) mutes the speaker amp when IO17 is
+  high-impedance ADC input — the two uses are physically incompatible
+- **I2S slave RX (IO06/05/07):** SI4732 digital audio pins not wired to the
+  Speaker Slot connector on this PCB — `i2s_read()` times out with no data
+
+#### What is working in SSB mode
+
+- SI4732 chip tuned correctly (AM mode, narrow bandwidth, tuning offsets for LSB/USB)
+- AGC disabled, soft mute disabled for SSB — correct chip configuration
+- BFO frequency display and fine-tune controls functional
+- Frequency display with 100 Hz step resolution functional
+- `SoftSSBDemod` code correct and ready — activates automatically once audio
+  capture is established via a hardware modification (see Web Audio Options)
+
+#### Path to working SSB
+
+SSB via the web stream will work once a hardware audio tap is added (Option 2a
+jumper wire or Option 4 ES7210 MIC3 mod — see Web Audio Options section).
+
+Speaker SSB requires either the SI4732 hardware SSB patch (binary blob, not used
+in this firmware) or a hardware modification to route audio through the ESP32's
+DAC back to the speaker amplifier.
 
 LSB and USB use different SI4732 chip tuning offsets so the sideband falls
 correctly in the AM passband. See `BandConfig.h` for the tuning notes.
@@ -75,16 +119,16 @@ No USB cable needed once the device is on Wi-Fi.
 - Battery fallback (gauge absent): 13-point LiPo discharge curve lookup
   instead of a linear approximation
 - Battery % and charging indicator on the local TFT display and web UI
-- **Wi-Fi modem sleep** — enabled after STA connect; reduces WiFi TX current
-  ~30% with negligible latency impact
+- **Wi-Fi modem sleep** — disabled; on ESP32-S3 modem sleep triggers periodic
+  RF calibration that preempts ADC1, causing audio stream dropouts
 - **WebSocket stream throttle** — stream task drops to 100 ms loop period
   when no browser clients are connected (vs 20 ms active), saving CPU
 
 ### Hardware UI
 - 1.9" ST7789V IPS TFT — frequency, mode, band, S-meter bar with peak tick,
   RDS, battery, and **UTC clock** (HH:MM:SS — shown after NTP sync)
-- **Auto-dim / auto-sleep** — TFT backlight dims after 30 s idle, turns off
-  after 2 min; any encoder or button input restores full brightness
+- **Auto-dim / auto-sleep** — TFT backlight dims after 60 s idle, turns off
+  after 5 min; any encoder or button input restores full brightness
 - Rotary encoder — tunes frequency, volume, BFO trim, or band (press cycles)
 - Long press — seek / mute toggle
 - Double press — reset BFO trim to zero
@@ -558,7 +602,7 @@ All installed automatically by PlatformIO from `platformio.ini`:
 | Power management | `PowerManager.h/.cpp` | ✅ Complete — BQ25896 + BQ27220 + LiPo curve |
 | Band configuration | `BandConfig.h` | ✅ Complete — 36 bands, FT8 table |
 | Radio control | `RadioController.h/.cpp` | ✅ Complete — AM/FM/SW/LW/SSB/CW; NVS + RTC persistence; 10 memory channels; S-meter peak hold |
-| Software SSB | `SoftSSBDemod.h/.cpp` | ✅ Complete — DDS BFO + biquad LPF |
+| Software SSB | `SoftSSBDemod.h/.cpp` | ✅ Code complete — DDS BFO + biquad LPF; inactive until audio capture hardware mod is done; does not affect speaker path |
 | Audio capture | `AudioCapture.h/.cpp` | ⚠️ Non-functional — I2S slave RX code present (Option 3); SI4732 digital audio not wired to IO06/05/07; hardware tap required |
 | FFT waterfall | `FFTProcessor.h/.cpp` | ✅ Complete — PSRAM buffers *(inactive — no audio input)* |
 | WebSocket server | `WebSocketHandler.h/.cpp` | ✅ Complete — idle throttle; memory channel support |
@@ -580,16 +624,18 @@ that connector). Options remaining: GPIO3/4 jumper wire from a LOUT tap on the
 module PCB (Option 2a), or ES7210 MIC3 solder mod (Option 4). Until one of
 these is implemented, the waterfall and audio stream produce no output.
 
+**SSB and CW do not produce usable audio on the speaker.** The SI4732 is placed
+in AM mode when SSB/CW is selected. Its AM detector cannot demodulate a
+suppressed-carrier SSB signal without carrier reinsertion — the speaker output is
+distorted and unintelligible. The software product detector (`SoftSSBDemod`) is
+in the web stream audio pipeline, not the speaker path, so it cannot help until a
+hardware audio tap is added. See the SSB section for full details and the path
+forward.
+
 **Browser decoders (FT8, JS8Call, CW) require audio.** These decoder modules
 are not included in the current web UI. They can be added back once a working
 audio tap is established. The JS8Call WASM source remains available in
 `js8call-decoder/` and `js8call-wasm-decoder/` for future integration.
-
-**Software SSB audio quality.** The product detector approach produces good
-intelligible audio for voice and FT8. It is not as clean as the hardware SSB
-patch for very weak signals, because the AM filter preceding the product
-detector passes some adjacent interference that hardware SSB would reject.
-The SI4732's 3 kHz AM bandwidth filter is the best available without the patch.
 
 ---
 
