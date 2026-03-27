@@ -205,32 +205,35 @@ static void saveCreds(const String& ssid, const String& pass) {
 // Populates _scanResultsJson; _scanInProgress guards re-entry.
 // ============================================================
 static String _scanResultsJson = "[]";
-static bool   _scanInProgress  = false;
+static bool   _scanStarted     = false;
 
-static void scanTask(void*) {
-    // Hide AP's own SSID from results; include hidden=false
-    int n = WiFi.scanNetworks(false, false);
+// Harvest completed async scan results into _scanResultsJson.
+// Clears _scanStarted so triggerScan() can start a fresh scan next call.
+static void buildScanJson() {
+    int n = WiFi.scanComplete();  // -1 = running, -2 = not started, ≥0 = done
+    if (n < 0) return;
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
     for (int i = 0; i < n; i++) {
-        // Skip our own AP SSID
-        if (WiFi.SSID(i) == AP_SSID) continue;
+        if (WiFi.SSID(i) == AP_SSID) continue;  // hide our own AP
         JsonObject net = arr.add<JsonObject>();
         net["ssid"] = WiFi.SSID(i);
         net["rssi"] = WiFi.RSSI(i);
         net["open"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
     }
     serializeJson(doc, _scanResultsJson);
-    _scanInProgress = false;
-    vTaskDelete(NULL);
+    WiFi.scanDelete();   // free scan result memory
+    _scanStarted = false;
 }
 
 static void triggerScan() {
-    if (_scanInProgress) return;
-    _scanInProgress = true;
-    _scanResultsJson = "[]"; // clear stale results
-    xTaskCreatePinnedToCore(scanTask, "WiFiScan", 4096, nullptr,
-                            1, nullptr, CORE_WEB);
+    if (_scanStarted) {
+        buildScanJson();  // collect results if the previous scan finished
+        return;
+    }
+    _scanResultsJson = "[]";
+    _scanStarted     = true;
+    WiFi.scanNetworks(/*async=*/true, /*show_hidden=*/false);
 }
 
 // ============================================================
@@ -478,7 +481,8 @@ static void handleWifiPage(AsyncWebServerRequest* req) {
 
 // GET /wifi/scan — return cached scan JSON, trigger fresh scan
 static void handleWifiScan(AsyncWebServerRequest* req) {
-    triggerScan(); // kick off a new scan (no-op if one is running)
+    buildScanJson();  // harvest results if the async scan has finished
+    triggerScan();    // start a new async scan (no-op if one is running)
     req->send(200, "application/json", _scanResultsJson);
 }
 

@@ -408,7 +408,7 @@ header {
 footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   padding: 6px 4px;
   margin-top: 8px;
   border-top: 1px solid var(--border);

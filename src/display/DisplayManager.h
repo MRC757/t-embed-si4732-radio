@@ -33,6 +33,7 @@ private:
     void _drawRDS(const RadioStatus& s);
     void _drawBattery(const RadioStatus& s);
     void _drawSSBInfo(const RadioStatus& s);
+    void _drawWifiStatus();
     void _drawEncoderTarget();
     void _drawClock();
     void _drawSleepCountdownOverlay();

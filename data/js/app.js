@@ -39,6 +39,7 @@ const state = {
 };
 
 let seekPending = false;
+let freqInputFocused = false;
 
 // ============================================================
 // WebSocket management
@@ -154,7 +155,12 @@ function updateFrequencyDisplay() {
   if (state.mode === 'FM' && state.stereo) sb.classList.remove('hidden');
   else sb.classList.add('hidden');
 
-  document.getElementById('freq-input').value = f;
+  if (!freqInputFocused) {
+    const inp = document.getElementById('freq-input');
+    inp.value       = display;
+    inp.step        = (unit === 'kHz') ? '1' : (state.mode === 'FM' ? '0.1' : '0.001');
+    inp.placeholder = 'Freq (' + unit + ')';
+  }
 
   const sel = document.getElementById('band-select');
   if (sel && state.bandIndex != null) sel.value = state.bandIndex;
@@ -260,13 +266,27 @@ async function loadBandSelectorFallback() {
 function wireControls() {
 
   // Tune
-  document.getElementById('btn-tune').addEventListener('click', () => {
-    const v = parseInt(document.getElementById('freq-input').value, 10);
-    if (!isNaN(v) && v > 0) sendCommand({ cmd: 'tune', freq: v });
-  });
-  document.getElementById('freq-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('btn-tune').click();
-  });
+  const freqInp = document.getElementById('freq-input');
+  freqInp.addEventListener('focus', () => { freqInputFocused = true; });
+  freqInp.addEventListener('blur',  () => { freqInputFocused = false; });
+
+  function doTune() {
+    const raw = parseFloat(freqInp.value);
+    if (isNaN(raw) || raw <= 0) return;
+    let freq;
+    if (state.mode === 'FM') {
+      freq = Math.round(raw * 100);                              // MHz → SI4735 FM units (×10 kHz)
+    } else if (state.freqKHz >= 1000 || ['LSB','USB','CW'].includes(state.mode)) {
+      freq = Math.round(raw * 1000);                             // MHz → kHz
+    } else {
+      freq = Math.round(raw);                                    // already kHz (LW/MW)
+    }
+    sendCommand({ cmd: 'tune', freq });
+    freqInp.blur();
+  }
+
+  document.getElementById('btn-tune').addEventListener('click', doTune);
+  freqInp.addEventListener('keydown', e => { if (e.key === 'Enter') doTune(); });
 
   // Step / seek
   document.getElementById('btn-step-up').addEventListener('click',   () => sendCommand({ cmd: 'step_up' }));
